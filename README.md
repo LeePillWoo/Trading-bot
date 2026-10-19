@@ -112,6 +112,8 @@ python -m trading_bot run --broker api --once
 | `sma` | 단기 이평 > 장기 이평이면 보유 | `short=5 long=20` |
 | `rsi` | RSI < 과매도 매수, RSI > 과매수 매도 | `period=14 oversold=30 overbought=70` |
 | `breakout` | N일 고가 돌파 매수, M일 저가 이탈 매도 | `entry=20 exit=10` |
+| `dual_momentum` | 매달 첫 거래일, 최근 lookback일 수익률 상위 top_n 종목 중 수익률이 무위험 수익률(rf)보다 높은 것만 보유 (없으면 현금). 후보 종목 5~15개 권장 | `lookback=252 top_n=2 rf=0.03` |
+| `vb` (백테스트 전용) | 변동성 돌파: 오늘 시가 + 어제 범위×k 돌파 시 매수, 다음 날 시가 매도. 매일 매매해 거래세 부담이 큼 | `k=0.5 ma=0` |
 
 새 전략은 `strategy.Strategy`를 상속해 `signals(df) -> Series[0/1]`을 구현하고 `STRATEGIES`에 등록하면 됩니다. t일 신호는 t일 종가까지의 데이터만 사용해야 합니다 (`tests/test_strategy_backtest.py::test_no_lookahead`가 검증).
 

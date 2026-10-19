@@ -198,10 +198,12 @@ def cmd_backtest(args, strategy, risk, cfg) -> int:
             rows.append((name, run(strat)))
         first = rows[0][1]
         print(f"기간 {first['기간']} · 종목 {', '.join(data)}\n")
-        print(f"{'전략':<10}{'수익률':>9}{'MDD':>9}{'거래':>6}{'승률':>8}")
+        labels = {"dual_momentum": "dual_mom"}
+        print(f"{'전략':<9}{'수익률':>8}{'MDD':>8}{'거래':>6}{'승률':>6}")
         for name, st in rows:
-            print(f"{name:<10}{st['총수익률']:>9.1%}{st['최대낙폭(MDD)']:>9.1%}{st['거래횟수']:>6}{st['승률']:>8.0%}")
-        print(f"{'단순보유':<10}{first['단순보유수익률']:>9.1%}{first['단순보유MDD']:>9.1%}")
+            print(f"{labels.get(name, name):<10}{st['총수익률']:>9.1%}{st['최대낙폭(MDD)']:>8.1%}"
+                  f"{st['거래횟수']:>6}{st['승률']:>6.0%}")
+        print(f"{'단순보유':<8}{first['단순보유수익률']:>9.1%}{first['단순보유MDD']:>8.1%}")
         return 0
 
     if strategy.needs_flow and not has_flow:
@@ -242,6 +244,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_backtest(args, strategy, risk, cfg)
 
     # run
+    if getattr(strategy, "intraday", False):
+        raise ValueError(f"{strategy.name} 은 아직 백테스트 전용입니다 (실매매 미지원)")
     from .bot import TradingBot
     from .broker.paper import PaperBroker
 

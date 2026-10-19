@@ -3,6 +3,8 @@
 - t일 종가로 신호를 계산하고 t+1일 시가에 체결한다 (미래 참조 방지).
 - 손절/익절은 t일 종가 기준으로 판단해 t+1일 시가에 매도한다.
 - 손절 후에는 신호가 한 번 0이 될 때까지 재진입하지 않는다 (실거래 봇과 동일한 규칙).
+- 변동성 돌파(vb): 장중 목표가 도달 시 그 가격에 매수, 다음 날 시가에 매도.
+- 듀얼 모멘텀: 매달 첫 거래일 시가에, 전날 종가까지의 수익률로 고른 종목으로 교체.
 """
 from __future__ import annotations
 
@@ -66,6 +68,20 @@ def run_backtest(data: dict[str, pd.DataFrame], strategy: Strategy, cash: float 
                  risk: RiskConfig | None = None, commission: float = 0.00015,
                  sell_tax: float = 0.002) -> BacktestResult:
     risk = risk or RiskConfig()
+    if getattr(strategy, "intraday", False):
+        return _run_intraday(data, strategy, cash, risk, commission, sell_tax)
+    if getattr(strategy, "portfolio", False):
+        return _run_portfolio(data, strategy, cash, commission, sell_tax)
+    return _run_daily(data, strategy, cash, risk, commission, sell_tax)
+
+
+def _benchmark(data: dict[str, pd.DataFrame], index: pd.DatetimeIndex, start: float) -> pd.Series:
+    """전 종목 동일비중 단순보유."""
+    closes = pd.DataFrame({s: df["close"] for s, df in data.items()}).reindex(index).ffill().bfill()
+    return (closes / closes.iloc[0]).mean(axis=1) * start
+
+
+def _run_daily(data, strategy, cash, risk, commission, sell_tax) -> BacktestResult:
     signals = {s: strategy.signals(df) for s, df in data.items()}
     dates = sorted(set().union(*(df.index for df in data.values())))
 
@@ -119,7 +135,83 @@ def run_backtest(data: dict[str, pd.DataFrame], strategy: Strategy, cash: float 
         equity_curve.append(cash + sum(t.qty * last_close[s] for s, t in positions.items()))
 
     equity = pd.Series(equity_curve, index=pd.DatetimeIndex(dates), name="equity")
-    # 벤치마크: 전 종목 동일비중 단순보유
-    closes = pd.DataFrame({s: df["close"] for s, df in data.items()}).reindex(equity.index).ffill().bfill()
-    benchmark = (closes / closes.iloc[0]).mean(axis=1) * equity.iloc[0]
-    return BacktestResult(equity=equity, trades=trades, benchmark=benchmark)
+    return BacktestResult(equity=equity, trades=trades, benchmark=_benchmark(data, equity.index, equity.iloc[0]))
+
+
+def _run_intraday(data, strategy, cash, risk, commission, sell_tax) -> BacktestResult:
+    """변동성 돌파: 목표가에 매수(종목당 max_position 비중), 다음 거래일 시가에 전량 매도."""
+    entries = {s: strategy.entry_prices(df) for s, df in data.items()}
+    dates = sorted(set().union(*(df.index for df in data.values())))
+    positions: dict[str, Trade] = {}
+    trades: list[Trade] = []
+    last_close: dict[str, float] = {}
+    equity_curve = []
+    for date in dates:
+        # 1) 어제 산 종목은 오늘 시가에 매도
+        for sym in list(positions):
+            if date in data[sym].index:
+                t = positions.pop(sym)
+                price = float(data[sym].at[date, "open"])
+                cash += price * t.qty * (1 - commission - sell_tax)
+                t.exit_date, t.exit_price, t.reason = date, price, "익일 시가"
+        equity = cash + sum(t.qty * last_close.get(s, t.entry_price) for s, t in positions.items())
+        # 2) 오늘 목표가 돌파 종목 매수
+        for sym, df in data.items():
+            if date not in df.index or sym in positions:
+                continue
+            price = entries[sym].get(date)
+            if price is not None and pd.notna(price):
+                qty = position_size(equity, cash, float(price), risk, commission)
+                if qty > 0:
+                    cash -= float(price) * qty * (1 + commission)
+                    t = Trade(sym, date, float(price), qty)
+                    positions[sym] = t
+                    trades.append(t)
+        for sym, df in data.items():
+            if date in df.index:
+                last_close[sym] = float(df.at[date, "close"])
+        equity_curve.append(cash + sum(t.qty * last_close[s] for s, t in positions.items()))
+    equity = pd.Series(equity_curve, index=pd.DatetimeIndex(dates), name="equity")
+    return BacktestResult(equity=equity, trades=trades, benchmark=_benchmark(data, equity.index, equity.iloc[0]))
+
+
+def _run_portfolio(data, strategy, cash, commission, sell_tax) -> BacktestResult:
+    """듀얼 모멘텀: 달이 바뀐 첫 거래일 시가에 리밸런싱 (선택은 전날 종가까지의 데이터로)."""
+    closes = pd.DataFrame({s: df["close"] for s, df in data.items()}).sort_index()
+    opens = pd.DataFrame({s: df["open"] for s, df in data.items()}).reindex(closes.index)
+    dates = closes.index
+    positions: dict[str, Trade] = {}
+    trades: list[Trade] = []
+    equity_curve = []
+    last_close: dict[str, float] = {}
+    for i, date in enumerate(dates):
+        if i > 0 and date.month != dates[i - 1].month:
+            hist = closes.iloc[:i]
+            selected = strategy.select({s: hist[s].dropna() for s in hist.columns})
+            # 빠지는 종목 매도
+            for sym in [s for s in positions if s not in selected]:
+                price = opens.at[date, sym]
+                if pd.isna(price):
+                    continue
+                t = positions.pop(sym)
+                cash += float(price) * t.qty * (1 - commission - sell_tax)
+                t.exit_date, t.exit_price, t.reason = date, float(price), "리밸런싱"
+            # 새로 들어오는 종목 매수 (전날 종가 기준 총자산 × 1/top_n)
+            equity = cash + sum(t.qty * last_close.get(s, t.entry_price) for s, t in positions.items())
+            for sym in selected:
+                price = opens.at[date, sym]
+                if sym in positions or pd.isna(price):
+                    continue
+                budget = min(equity * strategy.weight, cash)
+                qty = int(budget // (float(price) * (1 + commission)))
+                if qty > 0:
+                    cash -= float(price) * qty * (1 + commission)
+                    t = Trade(sym, date, float(price), qty)
+                    positions[sym] = t
+                    trades.append(t)
+        for sym in closes.columns:
+            if pd.notna(closes.at[date, sym]):
+                last_close[sym] = float(closes.at[date, sym])
+        equity_curve.append(cash + sum(t.qty * last_close[s] for s, t in positions.items()))
+    equity = pd.Series(equity_curve, index=dates, name="equity")
+    return BacktestResult(equity=equity, trades=trades, benchmark=_benchmark(data, equity.index, equity.iloc[0]))

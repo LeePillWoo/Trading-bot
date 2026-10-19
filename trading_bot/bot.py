@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import replace
 from datetime import datetime, time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -56,6 +57,8 @@ class BotState:
         self.close_reported: bool = data.get("close_reported", False)
         self.holiday: bool = data.get("holiday", False)
         self.start_equity: float = data.get("start_equity", 0.0)
+        # 듀얼 모멘텀: 마지막으로 리밸런싱한 달 (YYYY-MM)
+        self.portfolio_month: str = data.get("portfolio_month", "")
         self.blocked: set[str] = set(data.get("blocked", []))
         # 일시정지는 날짜가 바뀌어도 유지 (사람이 /start 로 풀어야 함)
         self.paused: bool = data.get("paused", False)
@@ -74,6 +77,7 @@ class BotState:
             "close_reported": self.close_reported, "holiday": self.holiday,
             "start_equity": self.start_equity, "blocked": sorted(self.blocked),
             "paused": self.paused, "pause_reason": self.pause_reason,
+            "portfolio_month": self.portfolio_month,
         }, ensure_ascii=False, indent=2))
 
 
@@ -156,11 +160,12 @@ class TradingBot:
             self.notify_error(f"매도 실패 {symbol}: {res.message}")
         return res.ok
 
-    def _buy(self, symbol: str, equity: float, cash: float) -> bool:
+    def _buy(self, symbol: str, equity: float, cash: float, weight: float | None = None) -> bool:
         if not self._can_order():
             return False
         price = self.broker.current_price(symbol)
-        qty = position_size(equity, cash, price, self.cfg.risk, self.cfg.commission)
+        risk = self.cfg.risk if weight is None else replace(self.cfg.risk, max_position_pct=weight)
+        qty = position_size(equity, cash, price, risk, self.cfg.commission)
         if qty <= 0:
             log.info("매수 건너뜀 %s: 주문 가능 수량 0 (현금 %.0f, 가격 %.0f)", symbol, cash, price)
             return False
@@ -222,7 +227,29 @@ class TradingBot:
             self.pause(f"하루 손실 한도 {limit:.0%} 도달 "
                        f"({self.state.start_equity:,.0f} → {acc.equity:,.0f}원)")
 
+    def portfolio_targets(self, today: pd.Timestamp) -> tuple[dict[str, int], bool, str]:
+        """듀얼 모멘텀: (목표 포지션, 거래일 여부, 보고용 모멘텀 요약)."""
+        closes, trading_day = {}, False
+        for sym in self.cfg.symbols:
+            try:
+                df = self.broker.daily_ohlcv(sym, days=self.strategy.warmup + 30)
+            except Exception as e:
+                log.exception("%s 일봉 조회 실패", sym)
+                self.notify_error(f"{sym} 일봉 조회 실패: {e}")
+                continue
+            trading_day |= bool((df.index >= today).any())
+            closes[sym] = df.loc[df.index < today, "close"]
+        if len(closes) < len(self.cfg.symbols):
+            return {}, trading_day, ""  # 일부 종목 조회 실패 → 다음 점검 때 재시도
+        selected = self.strategy.select(closes)
+        mom = self.strategy.momentum(closes)
+        note = "\n".join(f"· {s} {mom[s]:+.1%}{' ✅' if s in selected else ''}"
+                         for s in sorted(mom, key=mom.get, reverse=True))
+        return {s: int(s in selected) for s in self.cfg.symbols}, trading_day, note
+
     def rebalance(self, now: datetime) -> None:
+        if getattr(self.strategy, "portfolio", False):
+            return self.rebalance_portfolio(now)
         targets, trading_day = self.signals_for_today(pd.Timestamp(now.date()))
         if not targets:
             return  # 전 종목 조회 실패 → 다음 점검 때 재시도
@@ -255,6 +282,39 @@ class TradingBot:
         if flow_text:
             flow_text = "\n\n수급 (최근 5일 순매수)" + flow_text
         self.notify(f"☀️ 오늘의 매매 완료\n신호: {signal_text}{flow_text}\n\n주문 후 잔고\n"
+                    f"{format_account(self.broker.account(), self.state.start_equity)}")
+
+    def rebalance_portfolio(self, now: datetime) -> None:
+        month = now.strftime("%Y-%m")
+        if self.state.portfolio_month == month:
+            return  # 이번 달 리밸런싱 완료 — 다음 달 첫 거래일까지 대기 (손절 점검은 계속)
+        targets, trading_day, note = self.portfolio_targets(pd.Timestamp(now.date()))
+        if not targets:
+            return
+        if not trading_day:
+            self.state.holiday = True
+            self.state.save()
+            self.notify("오늘은 휴장일로 판단되어 매매하지 않습니다. (오늘 일봉 없음)")
+            return
+        for sym, target in targets.items():
+            if target == 0:
+                self.state.blocked.discard(sym)
+        acc = self.broker.account()
+        for sym, target in targets.items():
+            pos = acc.positions.get(sym)
+            if target == 0 and pos:
+                self._sell_all(sym, pos.qty, "리밸런싱 제외")
+        acc = self.broker.account()
+        cash, equity = acc.cash, acc.equity
+        for sym, target in targets.items():
+            if target == 1 and sym not in acc.positions and sym not in self.state.blocked:
+                if self._buy(sym, equity, cash, weight=self.strategy.weight):
+                    cash = self.broker.account().cash
+        self.state.portfolio_month = month
+        self.state.save()
+        held = [s for s, t in targets.items() if t] or ["없음 (전부 현금)"]
+        self.notify(f"📅 {month} 월간 리밸런싱 완료\n보유: {', '.join(held)}\n\n"
+                    f"최근 {self.strategy.lookback}거래일 수익률\n{note}\n\n주문 후 잔고\n"
                     f"{format_account(self.broker.account(), self.state.start_equity)}")
 
     def status_text(self) -> str:

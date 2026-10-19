@@ -139,7 +139,68 @@ class SmaFlowStrategy(Strategy):
         return pd.Series(pos, index=df.index, dtype=int)
 
 
-STRATEGIES = {cls.name: cls for cls in (SmaFlowStrategy, SmaCrossStrategy, RsiStrategy, BreakoutStrategy)}
+class VolatilityBreakoutStrategy(Strategy):
+    """변동성 돌파 (래리 윌리엄스). 장중 매매 전략 — 백테스트 전용.
+
+    매수: 오늘 시가 + 어제(고가-저가) × k 를 장중에 넘는 순간, 그 가격에
+    매도: 다음 날 시가에 전량
+    ma > 0 이면 시가가 어제까지의 ma일 이동평균보다 높을 때만 매수 (하락장 필터)
+    """
+
+    name = "vb"
+    intraday = True
+
+    def __init__(self, k: float = 0.5, ma: int = 0):
+        self.k, self.ma = k, ma
+        self.warmup = max(ma, 1) + 1
+
+    def entry_prices(self, df: pd.DataFrame) -> pd.Series:
+        """날짜별 매수 가격 (매수 안 하는 날은 NaN). 어제까지의 값과 오늘 시가만 사용."""
+        target = df["open"] + (df["high"] - df["low"]).shift(1) * self.k
+        ok = df["high"] >= target
+        if self.ma:
+            ok &= df["open"] > df["close"].rolling(self.ma).mean().shift(1)
+        return target.where(ok)
+
+    def signals(self, df: pd.DataFrame) -> pd.Series:
+        raise NotImplementedError("vb 는 장중 전략이라 일봉 신호가 없습니다 (백테스트 전용)")
+
+
+class DualMomentumStrategy(Strategy):
+    """듀얼 모멘텀 (월 1회 리밸런싱).
+
+    매달 첫 거래일, 후보 종목 중 최근 lookback 거래일 수익률 상위 top_n 종목을 고르되
+    (상대 모멘텀) 그 수익률이 무위험 수익률(rf, 연율)보다 높은 종목만 보유한다 (절대 모멘텀).
+    조건을 만족하는 종목이 없으면 현금. 종목당 비중은 1/top_n.
+    """
+
+    name = "dual_momentum"
+    portfolio = True
+
+    def __init__(self, lookback: int = 252, top_n: int = 2, rf: float = 0.03):
+        self.lookback, self.top_n, self.rf = lookback, top_n, rf
+        self.warmup = lookback + 1
+
+    @property
+    def weight(self) -> float:
+        return 1 / self.top_n
+
+    def momentum(self, closes: dict[str, pd.Series]) -> dict[str, float]:
+        return {s: float(c.iloc[-1] / c.iloc[-1 - self.lookback] - 1)
+                for s, c in closes.items() if len(c) > self.lookback}
+
+    def select(self, closes: dict[str, pd.Series]) -> list[str]:
+        hurdle = (1 + self.rf) ** (self.lookback / 252) - 1
+        mom = self.momentum(closes)
+        ranked = sorted(mom, key=mom.get, reverse=True)[:self.top_n]
+        return [s for s in ranked if mom[s] > hurdle]
+
+    def signals(self, df: pd.DataFrame) -> pd.Series:
+        raise NotImplementedError("dual_momentum 은 종목 묶음 단위 전략입니다 (select 사용)")
+
+
+STRATEGIES = {cls.name: cls for cls in (SmaFlowStrategy, SmaCrossStrategy, RsiStrategy, BreakoutStrategy,
+                                        VolatilityBreakoutStrategy, DualMomentumStrategy)}
 
 
 def make_strategy(name: str, **params) -> Strategy:

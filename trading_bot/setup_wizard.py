@@ -171,10 +171,12 @@ class Wizard:
         symbols = self.ask("  매매할 종목코드 (띄어쓰기로 구분)", default=" ".join(parts[i + 1:j]))
         parts[i + 1:j] = symbols.split()
         current = parts[parts.index("--strategy") + 1] if "--strategy" in parts[:-1] else "sma_flow"
-        choices = {"1": "breakout", "2": "sma_flow", "3": "sma"}
-        pick = self.ask("  전략: 1=채널돌파(손실 작게), 2=이동평균+수급, 3=이동평균",
+        choices = {"1": "breakout", "2": "sma_flow", "3": "sma", "4": "dual_momentum"}
+        pick = self.ask("  전략: 1=채널돌파(손실 작게), 2=이동평균+수급, 3=이동평균, 4=듀얼모멘텀(월1회)",
                         default={v: k for k, v in choices.items()}.get(current, "1"))
         strategy = choices.get(pick, current)
+        if strategy == "dual_momentum" and len(parts[i + 1:i + 1 + len(symbols.split())]) < 4:
+            print("  ⚠️ 듀얼 모멘텀은 후보 종목이 많을수록 의미가 있습니다 (5~15개 권장).")
         if "--strategy" in parts[:-1]:
             parts[parts.index("--strategy") + 1] = strategy
         else:
