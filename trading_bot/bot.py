@@ -39,6 +39,7 @@ MARKET_OPEN = dtime(9, 0)
 MARKET_CLOSE = dtime(15, 30)
 CLOSE_REPORT_TIME = dtime(15, 35)
 ERROR_NOTIFY_INTERVAL = 1800  # 같은 오류는 30분에 한 번만 알림
+HEARTBEAT_SEC = 3600  # 1시간마다 로그에 작동 기록
 
 HELP = ("/status 현재 상태\n/report 계좌 보고서\n/stop 비상정지 (모든 주문 중단)\n"
         "/start 매매 재개\n/help 명령 목록")
@@ -507,7 +508,12 @@ class TradingBot:
         paused = f"\n⛔ 현재 일시정지 상태 ({self.state.pause_reason}) — /start 로 재개" if self.state.paused else ""
         self.notify(f"🤖 자동매매 봇 시작\n{self.describe()}{paused}\n\n{HELP}")
         next_step = 0.0
+        next_heartbeat = time.monotonic() + HEARTBEAT_SEC
         while True:
+            if time.monotonic() >= next_heartbeat:
+                # 꺼진 시각을 나중에 로그로 알 수 있도록 주기적으로 남긴다
+                log.info("작동 중 (일시정지=%s)", self.state.paused)
+                next_heartbeat = time.monotonic() + HEARTBEAT_SEC
             if time.monotonic() >= next_step:
                 try:
                     self.step()
