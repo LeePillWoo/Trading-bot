@@ -66,8 +66,10 @@ class BacktestResult:
 
 def run_backtest(data: dict[str, pd.DataFrame], strategy: Strategy, cash: float = 10_000_000,
                  risk: RiskConfig | None = None, commission: float = 0.00015,
-                 sell_tax: float = 0.002) -> BacktestResult:
+                 sell_tax: float = 0.002, slippage: float = 0.0) -> BacktestResult:
+    """slippage: 체결 불리함(매수는 그만큼 비싸게, 매도는 싸게). 매매 비용에 더해 계산."""
     risk = risk or RiskConfig()
+    commission = commission + slippage
     if getattr(strategy, "intraday", False):
         return _run_intraday(data, strategy, cash, risk, commission, sell_tax)
     if getattr(strategy, "portfolio", False):

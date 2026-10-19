@@ -89,6 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--max-daily-loss", type=float, default=0.03,
                         help="하루 손실 한도, 도달하면 일시정지 (0이면 미사용)")
         sp.add_argument("--cash", type=float, default=10_000_000, help="초기 자금 (백테스트/가상매매)")
+        sp.add_argument("--slippage", type=float, default=0.0,
+                        help="백테스트 체결 불리함 (예: 0.001 = 매수/매도 각 0.1%%)")
         sp.add_argument("--sell-tax", type=float, default=0.002,
                         help="매도 시 거래세 (주식 0.002, 국내 ETF 는 0)")
 
@@ -189,7 +191,8 @@ def cmd_backtest(args, strategy, risk, cfg) -> int:
 
     def run(strat):
         return run_backtest(data, strat, cash=args.cash, risk=risk,
-                            commission=cfg.commission, sell_tax=cfg.sell_tax).stats()
+                            commission=cfg.commission, sell_tax=cfg.sell_tax,
+                            slippage=args.slippage).stats()
 
     if args.compare:
         rows = []

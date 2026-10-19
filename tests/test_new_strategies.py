@@ -110,3 +110,11 @@ def test_sell_tax_option_reaches_backtest(capsys):
     untaxed = capsys.readouterr().out
     final = lambda out: int(next(l for l in out.splitlines() if "최종자산" in l).split(":")[1].replace(",", ""))
     assert final(untaxed) > final(taxed)
+
+
+def test_slippage_reduces_returns():
+    data = {"A": synthetic_ohlcv(300, seed=2)}
+    strat = VolatilityBreakoutStrategy(k=0.5)
+    base = run_backtest(data, strat).equity.iloc[-1]
+    slipped = run_backtest(data, strat, slippage=0.001).equity.iloc[-1]
+    assert slipped < base
