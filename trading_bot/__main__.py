@@ -89,6 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--max-daily-loss", type=float, default=0.03,
                         help="하루 손실 한도, 도달하면 일시정지 (0이면 미사용)")
         sp.add_argument("--cash", type=float, default=10_000_000, help="초기 자금 (백테스트/가상매매)")
+        sp.add_argument("--core-strategy", choices=sorted(STRATEGIES),
+                        help="장기 전략을 따로 운용 (예: dual_momentum). 지정하면 계좌를 장기/적극으로 나눔")
+        sp.add_argument("--core-symbols", nargs="+", help="장기 전략 후보 종목")
+        sp.add_argument("--core-weight", type=float, default=0.7, help="장기 전략 비중 (기본 0.7)")
+        sp.add_argument("--core-param", nargs="*", default=[], metavar="KEY=VALUE", help="장기 전략 파라미터")
         sp.add_argument("--slippage", type=float, default=0.0,
                         help="백테스트 체결 불리함 (예: 0.001 = 매수/매도 각 0.1%%)")
         sp.add_argument("--sell-tax", type=float, default=0.002,
@@ -170,23 +175,67 @@ def service_argv() -> list[str]:
     return ["run", "--broker", "api", *shlex.split(os.environ.get("BOT_ARGS", ""))]
 
 
-def cmd_backtest(args, strategy, risk, cfg) -> int:
+def load_data(args, symbols: list[str]) -> dict:
     from .strategy import with_flow
 
     if args.csv:
-        data = {Path(f).stem: load_csv(f) for f in args.csv}
-    elif args.fetch:
+        return {Path(f).stem: load_csv(f) for f in args.csv}
+    if args.fetch:
         api, _ = make_api_broker(args.api, require_account=False)
         data = {}
-        for s in args.symbols:
+        for s in symbols:
             df = api.daily_ohlcv(s, args.days)
             try:
                 df = with_flow(df, api.investor_flow(s, args.days))
             except Exception as e:
                 print(f"({s} 수급 데이터 없음: {e})")
             data[s] = df
-    else:
-        data = {s: synthetic_ohlcv(args.days, seed=i) for i, s in enumerate(args.symbols)}
+        return data
+    return {s: synthetic_ohlcv(args.days, seed=i) for i, s in enumerate(symbols)}
+
+
+def print_stats(stats: dict) -> None:
+    for k, v in stats.items():
+        if k == "샤프지수":
+            print(f"{k:>14}: {v:.2f}")
+        elif isinstance(v, float):
+            print(f"{k:>14}: {v:.2%}")
+        else:
+            print(f"{k:>14}: {v:,}" if isinstance(v, int) else f"{k:>14}: {v}")
+
+
+def cmd_backtest_sleeves(args, strategy, risk, cfg) -> int:
+    """장기/적극 나눠 운용: 각 전략을 자기 비중만큼의 자금으로 따로 돌려 합친다."""
+    from .backtest import BacktestResult, _benchmark
+
+    core = make_strategy(args.core_strategy, **parse_params(args.core_param))
+    core_syms = args.core_symbols or args.symbols
+    data = load_data(args, list(dict.fromkeys(core_syms + args.symbols)))
+    w = args.core_weight
+    kw = dict(risk=risk, commission=cfg.commission, sell_tax=cfg.sell_tax, slippage=args.slippage)
+    parts = [("장기", core, core_syms, w), ("적극", strategy, args.symbols, 1 - w)]
+    results = []
+    for name, strat, syms, weight in parts:
+        res = run_backtest({s: data[s] for s in syms}, strat, cash=args.cash * weight, **kw)
+        results.append((name, strat, weight, res))
+    index = results[0][3].equity.index.union(results[1][3].equity.index)
+    equity = sum(r.equity.reindex(index).ffill().bfill() for *_, r in results)
+    combined = BacktestResult(equity=equity, trades=[t for *_, r in results for t in r.trades],
+                              benchmark=_benchmark(data, index, equity.iloc[0]))
+    print("== 합계")
+    print_stats(combined.stats())
+    print("\n== 전략별")
+    for name, strat, weight, res in results:
+        st = res.stats()
+        print(f"[{name}] {strat.name} {weight:.0%}: 수익률 {st['총수익률']:.1%} · MDD {st['최대낙폭(MDD)']:.1%}"
+              f" · 거래 {st['거래횟수']}")
+    return 0
+
+
+def cmd_backtest(args, strategy, risk, cfg) -> int:
+    if args.core_strategy and not args.compare:
+        return cmd_backtest_sleeves(args, strategy, risk, cfg)
+    data = load_data(args, args.symbols)
     has_flow = all("foreign" in df.columns for df in data.values())
 
     def run(strat):
@@ -213,13 +262,7 @@ def cmd_backtest(args, strategy, risk, cfg) -> int:
 
     if strategy.needs_flow and not has_flow:
         raise ValueError(f"{strategy.name} 전략은 투자자 수급 데이터가 필요합니다 (--fetch 또는 --demo)")
-    for k, v in run(strategy).items():
-        if k == "샤프지수":
-            print(f"{k:>14}: {v:.2f}")
-        elif isinstance(v, float):
-            print(f"{k:>14}: {v:.2%}")
-        else:
-            print(f"{k:>14}: {v:,}" if isinstance(v, int) else f"{k:>14}: {v}")
+    print_stats(run(strategy))
     return 0
 
 
@@ -271,7 +314,15 @@ def main(argv: list[str] | None = None) -> int:
     hh, mm = map(int, args.trade_time.split(":"))
     state_path = f"bot_state_{args.broker}_{args.api}_{mode}.json"
     label = {"paper": "모의투자", "real": "실전"}[mode] if args.broker == "api" else "가상매매"
-    bot = TradingBot(broker, strategy, cfg, state_path=state_path, trade_time=dtime(hh, mm),
+    plan = strategy
+    if args.core_strategy:
+        from .bot import Sleeve
+        core = make_strategy(args.core_strategy, **parse_params(args.core_param))
+        if getattr(core, "intraday", False):
+            raise ValueError(f"{core.name} 은 아직 백테스트 전용입니다 (실매매 미지원)")
+        plan = [Sleeve(core, args.core_symbols or args.symbols, args.core_weight, "장기"),
+                Sleeve(strategy, args.symbols, 1 - args.core_weight, "적극")]
+    bot = TradingBot(broker, plan, cfg, state_path=state_path, trade_time=dtime(hh, mm),
                      notifier=make_notifier(), label=label)
     if args.once:
         bot.step()

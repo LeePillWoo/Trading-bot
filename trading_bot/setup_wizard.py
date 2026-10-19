@@ -15,7 +15,37 @@ from .notify import TelegramNotifier
 from .redact import redact
 
 DEFAULT_BOT_ARGS = "--symbols 005930 000660 --strategy breakout --max-position 0.2 --stop-loss 0.07 --max-daily-loss 0.03"
+# 장기(듀얼 모멘텀) 기본 후보: 대형주 12개
+CORE_SYMBOLS = ["005930", "000660", "005380", "000270", "068270", "035420",
+                "035720", "051910", "006400", "105560", "055550", "012330"]
 ACCOUNT_TYPES = {"01": "실전(일반)", "02": "실전(주문대리인)", "03": "모의투자"}
+
+
+def parse_bot_args(text: str):
+    from .__main__ import build_parser
+    return build_parser().parse_args(["run", "--broker", "api", *text.split()])
+
+
+def format_bot_args(ns) -> str:
+    """BOT_ARGS 문자열로 되돌린다 (기본값과 같은 고급 옵션은 생략)."""
+    parts = ["--symbols", *ns.symbols, "--strategy", ns.strategy]
+    if ns.param:
+        parts += ["--param", *ns.param]
+    parts += ["--max-position", f"{ns.max_position:g}", "--stop-loss", f"{ns.stop_loss:g}",
+              "--max-daily-loss", f"{ns.max_daily_loss:g}"]
+    if ns.take_profit:
+        parts += ["--take-profit", f"{ns.take_profit:g}"]
+    if ns.core_strategy:
+        parts += ["--core-strategy", ns.core_strategy, "--core-weight", f"{ns.core_weight:g}",
+                  "--core-symbols", *(ns.core_symbols or ns.symbols)]
+        if ns.core_param:
+            parts += ["--core-param", *ns.core_param]
+    for opt, default in (("api", "namuh"), ("interval", 300), ("trade_time", "09:05"), ("sell_tax", 0.002)):
+        if getattr(ns, opt) != default:
+            parts += [f"--{opt.replace('_', '-')}", f"{getattr(ns, opt)}"]
+    if ns.confirm_real:
+        parts.append("--confirm-real")
+    return " ".join(parts)
 
 
 def read_env(path: Path) -> dict[str, str]:
@@ -158,33 +188,33 @@ class Wizard:
         else:
             print("  → 텔레그램 없이 진행 (알림/명령 사용 불가)")
 
-        # 4) 종목
+        # 4) 매매 설정
         print("\n[4/4] 매매 설정")
-        bot_args = self.env.get("BOT_ARGS") or DEFAULT_BOT_ARGS
-        parts = bot_args.replace("--confirm-real", "").split()
-        if "--symbols" not in parts:
-            parts = ["--symbols", "005930", *parts]
-        i = parts.index("--symbols")
-        j = i + 1
-        while j < len(parts) and not parts[j].startswith("--"):
-            j += 1
-        symbols = self.ask("  매매할 종목코드 (띄어쓰기로 구분)", default=" ".join(parts[i + 1:j]))
-        parts[i + 1:j] = symbols.split()
-        current = parts[parts.index("--strategy") + 1] if "--strategy" in parts[:-1] else "sma_flow"
-        choices = {"1": "breakout", "2": "sma_flow", "3": "sma", "4": "dual_momentum"}
-        pick = self.ask("  전략: 1=채널돌파(손실 작게), 2=이동평균+수급, 3=이동평균, 4=듀얼모멘텀(월1회)",
-                        default={v: k for k, v in choices.items()}.get(current, "1"))
-        strategy = choices.get(pick, current)
-        if strategy == "dual_momentum" and len(parts[i + 1:i + 1 + len(symbols.split())]) < 4:
-            print("  ⚠️ 듀얼 모멘텀은 후보 종목이 많을수록 의미가 있습니다 (5~15개 권장).")
-        if "--strategy" in parts[:-1]:
-            parts[parts.index("--strategy") + 1] = strategy
+        ns = parse_bot_args(self.env.get("BOT_ARGS") or DEFAULT_BOT_ARGS)
+        ns.symbols = self.ask("  적극 매매 종목코드 (띄어쓰기로 구분)", default=" ".join(ns.symbols)).split()
+        split = self.ask("  운용 방식: 1=전략 하나, 2=장기(듀얼모멘텀)+적극 나눠서",
+                         default="2" if ns.core_strategy else "1") == "2"
+        names = {"1": "breakout", "2": "sma_flow", "3": "sma", "4": "dual_momentum"}
+        label = "1=채널돌파(손실 작게), 2=이동평균+수급, 3=이동평균"
+        if not split:
+            label += ", 4=듀얼모멘텀(월1회)"
+        current = {v: k for k, v in names.items()}.get(ns.strategy, "1")
+        ns.strategy = names.get(self.ask(f"  {'적극 ' if split else ''}전략: {label}", default=current),
+                                ns.strategy)
+        if split:
+            ns.core_strategy = "dual_momentum"
+            ns.core_param = ns.core_param or ["top_n=3"]
+            ns.core_weight = float(self.ask("  장기 비중 (0~1)", default=str(ns.core_weight)))
+            ns.core_symbols = self.ask("  장기 후보 종목 (5~15개 권장)",
+                                       default=" ".join(ns.core_symbols or CORE_SYMBOLS)).split()
         else:
-            parts += ["--strategy", strategy]
-        if mode == "real":
-            parts.append("--confirm-real")
-        self.set({"BOT_ARGS": " ".join(parts)})
-        print(f"  → {' '.join(parts)}")
+            ns.core_strategy = None
+            if ns.strategy == "dual_momentum" and len(ns.symbols) < 4:
+                print("  ⚠️ 듀얼 모멘텀은 후보 종목이 많을수록 의미가 있습니다 (5~15개 권장).")
+        ns.confirm_real = mode == "real"
+        bot_args = format_bot_args(ns)
+        self.set({"BOT_ARGS": bot_args})
+        print(f"  → {bot_args}")
 
         print("\n✅ 설정 완료 (.env 저장됨)")
         return 0

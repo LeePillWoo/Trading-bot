@@ -6,6 +6,10 @@
 - 손절/익절 후에는 신호가 한 번 0이 될 때까지 재진입하지 않는다.
 - 설정한 symbols 외의 보유 종목은 건드리지 않는다.
 
+슬리브(sleeve): 계좌를 비중별로 나눠 전략을 여러 개 돌릴 수 있다 (예: 장기 70% / 적극 30%).
+- 슬리브마다 자기가 산 수량을 장부(state.holdings)에 따로 기록하고, 팔 때도 자기 몫만 판다.
+- 슬리브 자금 = 총자산 × 비중, 그중 이미 보유한 평가액을 뺀 만큼만 새로 산다.
+
 안전장치:
 - 일시정지(/stop 또는 하루 손실 한도 도달) 중에는 어떤 주문도 내지 않는다. /start 로 해제.
 - 오늘 일봉이 없으면 휴장일로 보고 매매하지 않는다.
@@ -15,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -45,6 +49,22 @@ def is_market_open(now: datetime) -> bool:
     return now.weekday() < 5 and MARKET_OPEN <= now.time() < MARKET_CLOSE
 
 
+@dataclass
+class Sleeve:
+    strategy: Strategy
+    symbols: list[str]
+    weight: float = 1.0
+    name: str = ""  # 여러 개일 때 "장기"/"적극" 등. 하나면 빈 문자열
+
+    def key(self, symbol: str) -> str:
+        """재진입 금지(blocked) 기록용 키."""
+        return f"{self.name}:{symbol}" if self.name else symbol
+
+    @property
+    def tag(self) -> str:
+        return f"[{self.name}] " if self.name else ""
+
+
 class BotState:
     """재시작해도 유지되어야 하는 상태."""
 
@@ -57,8 +77,11 @@ class BotState:
         self.close_reported: bool = data.get("close_reported", False)
         self.holiday: bool = data.get("holiday", False)
         self.start_equity: float = data.get("start_equity", 0.0)
-        # 듀얼 모멘텀: 마지막으로 리밸런싱한 달 (YYYY-MM)
-        self.portfolio_month: str = data.get("portfolio_month", "")
+        # 듀얼 모멘텀: 슬리브별 마지막 리밸런싱 달 (YYYY-MM)
+        months = data.get("portfolio_month", {})
+        self.portfolio_month: dict[str, str] = months if isinstance(months, dict) else {"": months}
+        # 슬리브별 보유 장부: {슬리브: {종목: {"qty": 수량, "price": 매수가}}}. None 이면 아직 초기화 전
+        self.holdings: dict[str, dict[str, dict]] | None = data.get("holdings")
         self.blocked: set[str] = set(data.get("blocked", []))
         # 일시정지는 날짜가 바뀌어도 유지 (사람이 /start 로 풀어야 함)
         self.paused: bool = data.get("paused", False)
@@ -77,7 +100,7 @@ class BotState:
             "close_reported": self.close_reported, "holiday": self.holiday,
             "start_equity": self.start_equity, "blocked": sorted(self.blocked),
             "paused": self.paused, "pause_reason": self.pause_reason,
-            "portfolio_month": self.portfolio_month,
+            "portfolio_month": self.portfolio_month, "holdings": self.holdings,
         }, ensure_ascii=False, indent=2))
 
 
@@ -104,11 +127,11 @@ def format_account(acc: Account, start_equity: float = 0.0) -> str:
 
 
 class TradingBot:
-    def __init__(self, broker: Broker, strategy: Strategy, config: BotConfig,
+    def __init__(self, broker: Broker, strategy: Strategy | list[Sleeve], config: BotConfig,
                  state_path: str | Path = "bot_state.json", trade_time: dtime = dtime(9, 5),
                  notifier: Notifier | None = None, label: str = ""):
         self.broker = broker
-        self.strategy = strategy
+        self.sleeves = strategy if isinstance(strategy, list) else [Sleeve(strategy, list(config.symbols))]
         self.cfg = config
         self.state = BotState(state_path)
         self.trade_time = trade_time
@@ -116,6 +139,14 @@ class TradingBot:
         self.label = label
         self._last_errors: dict[str, float] = {}
         self.flow_notes: dict[str, str] = {}
+
+    @property
+    def strategy(self) -> Strategy:
+        return self.sleeves[0].strategy
+
+    @strategy.setter
+    def strategy(self, value: Strategy) -> None:
+        self.sleeves[0].strategy = value
 
     def notify(self, text: str) -> None:
         self.notifier.send(f"[{self.label}] {text}" if self.label else text)
@@ -139,6 +170,48 @@ class TradingBot:
         self.state.save()
         self.notify("▶️ 매매를 재개합니다.")
 
+    # ---------- 장부 ----------
+    def ledger(self, sleeve: Sleeve) -> dict[str, dict]:
+        if self.state.holdings is None:
+            self.state.holdings = {}
+        return self.state.holdings.setdefault(sleeve.name, {})
+
+    def init_ledger(self, acc: Account) -> None:
+        """장부 준비.
+        - 장부가 없던 이전 버전에서 넘어올 때: 전략이 하나면 그 종목의 기존 보유분을 장부로 가져온다.
+        - 운용 방식을 바꿔 장부 이름이 달라졌으면(전략 하나 ↔ 장기/적극) 그 종목을 가진 슬리브로 옮긴다
+          (겹치면 적극 쪽 우선).
+        """
+        if self.state.holdings is not None:
+            names = {sl.name for sl in self.sleeves}
+            for old in [k for k in self.state.holdings if k not in names]:
+                for sym, h in self.state.holdings.pop(old).items():
+                    target = next((sl for sl in reversed(self.sleeves) if sym in sl.symbols), None)
+                    if target is None:
+                        log.warning("%s: 운용 방식 변경 후 담당 전략이 없어 장부에서 제외 (계좌에는 그대로)", sym)
+                        continue
+                    cur = self.ledger(target).get(sym)
+                    if cur:
+                        cur["qty"] += h["qty"]
+                    else:
+                        self.ledger(target)[sym] = dict(h)
+                self.state.save()
+            return
+        self.state.holdings = {}
+        if len(self.sleeves) == 1:
+            sl = self.sleeves[0]
+            for sym in sl.symbols:
+                if pos := acc.positions.get(sym):
+                    self.ledger(sl)[sym] = {"qty": pos.qty, "price": pos.avg_price}
+        self.state.save()
+
+    def budget(self, sleeve: Sleeve, acc: Account) -> tuple[float, float]:
+        """(슬리브 자금, 슬리브가 새로 쓸 수 있는 현금)."""
+        equity = acc.equity * sleeve.weight
+        held = sum(h["qty"] * (acc.positions[s].current_price if s in acc.positions else h["price"])
+                   for s, h in self.ledger(sleeve).items())
+        return equity, max(0.0, min(equity - held, acc.cash))
+
     # ---------- 주문 헬퍼 ----------
     def _can_order(self) -> bool:
         if self.state.paused:
@@ -148,184 +221,214 @@ class TradingBot:
             return False
         return True
 
-    def _sell_all(self, symbol: str, qty: int, reason: str) -> bool:
+    def _sell(self, sleeve: Sleeve, symbol: str, acc: Account, reason: str) -> bool:
+        """슬리브 장부에 있는 자기 몫만 매도."""
+        held = self.ledger(sleeve).get(symbol)
+        pos = acc.positions.get(symbol)
+        qty = min(held["qty"], pos.qty) if held and pos else 0
+        if qty <= 0:
+            self.ledger(sleeve).pop(symbol, None)  # 계좌에 없으면 장부 정리
+            self.state.save()
+            return False
         if not self._can_order():
             return False
         res = self.broker.sell(symbol, qty)
         self.state.orders += 1
-        self.state.save()
         if res.ok:
-            self.notify(f"🔵 매도 주문 {symbol} {res.qty}주 ({reason}) 주문번호 {res.order_id}")
+            self.ledger(sleeve).pop(symbol, None)
+            self.notify(f"🔵 {sleeve.tag}매도 주문 {symbol} {res.qty}주 ({reason}) 주문번호 {res.order_id}")
         else:
-            self.notify_error(f"매도 실패 {symbol}: {res.message}")
+            self.notify_error(f"{sleeve.tag}매도 실패 {symbol}: {res.message}")
+        self.state.save()
         return res.ok
 
-    def _buy(self, symbol: str, equity: float, cash: float, weight: float | None = None) -> bool:
+    def _buy(self, sleeve: Sleeve, symbol: str, equity: float, cash: float, weight: float) -> bool:
         if not self._can_order():
             return False
         price = self.broker.current_price(symbol)
-        risk = self.cfg.risk if weight is None else replace(self.cfg.risk, max_position_pct=weight)
-        qty = position_size(equity, cash, price, risk, self.cfg.commission)
+        qty = position_size(equity, cash, price, replace(self.cfg.risk, max_position_pct=weight),
+                            self.cfg.commission)
         if qty <= 0:
             log.info("매수 건너뜀 %s: 주문 가능 수량 0 (현금 %.0f, 가격 %.0f)", symbol, cash, price)
             return False
         res = self.broker.buy(symbol, qty)
         self.state.orders += 1
-        self.state.save()
         if res.ok:
-            self.notify(f"🔴 매수 주문 {symbol} {res.qty}주 (약 {price:,.0f}원) 주문번호 {res.order_id}")
+            self.ledger(sleeve)[symbol] = {"qty": res.qty, "price": price}
+            self.notify(f"🔴 {sleeve.tag}매수 주문 {symbol} {res.qty}주 (약 {price:,.0f}원) 주문번호 {res.order_id}")
         else:
-            self.notify_error(f"매수 실패 {symbol}: {res.message}")
+            self.notify_error(f"{sleeve.tag}매수 실패 {symbol}: {res.message}")
+        self.state.save()
         return res.ok
 
     # ---------- 매매 로직 ----------
-    def signals_for_today(self, today: pd.Timestamp) -> tuple[dict[str, int], bool]:
+    def signals_for_today(self, sleeve: Sleeve, today: pd.Timestamp) -> tuple[dict[str, int], bool]:
         """(종목별 목표 포지션, 오늘 거래일 여부). 오늘 일봉이 하나라도 있으면 거래일."""
+        strategy = sleeve.strategy
         targets, trading_day = {}, False
-        self.flow_notes = {}
-        for sym in self.cfg.symbols:
+        for sym in sleeve.symbols:
             try:
-                df = self.broker.daily_ohlcv(sym, days=self.strategy.warmup + 60)
+                df = self.broker.daily_ohlcv(sym, days=strategy.warmup + 60)
             except Exception as e:
                 log.exception("%s 일봉 조회 실패", sym)
                 self.notify_error(f"{sym} 일봉 조회 실패: {e}")
                 continue
             trading_day |= bool((df.index >= today).any())
             past = df[df.index < today]  # 장중 미완성 봉 제외
-            if getattr(self.strategy, "needs_flow", False):
+            if getattr(strategy, "needs_flow", False):
                 try:
-                    flow = self.broker.investor_flow(sym, days=self.strategy.warmup + 60)
+                    flow = self.broker.investor_flow(sym, days=strategy.warmup + 60)
                 except Exception as e:
                     log.exception("%s 수급 조회 실패", sym)
                     self.notify_error(f"{sym} 수급 조회 실패 (오늘 신규 매수 안 함): {e}")
                     flow = pd.DataFrame(columns=["foreign", "institution"], dtype=float)
                 past = with_flow(past, flow)
                 self.flow_notes[sym] = flow_note(past)
-            if len(past) < self.strategy.warmup:
+            if len(past) < strategy.warmup:
                 log.warning("%s: 데이터 부족 (%d봉)", sym, len(past))
                 targets[sym] = 0
             else:
-                targets[sym] = int(self.strategy.signals(past).iloc[-1])
+                targets[sym] = int(strategy.signals(past).iloc[-1])
         return targets, trading_day
 
     def check_risk(self, acc: Account) -> None:
-        """손절/익절, 하루 손실 한도."""
+        """손절/익절 (슬리브 장부의 매수가 기준), 하루 손실 한도 (계좌 전체)."""
+        self.init_ledger(acc)
         if not self.state.start_equity:
             self.state.start_equity = acc.equity
             self.state.save()
         # 손절이 먼저: 손실 한도로 멈추기 전에 손실 종목부터 정리
-        for sym in self.cfg.symbols:
-            pos = acc.positions.get(sym)
-            if not pos:
-                continue
-            reason = exit_reason(pos.avg_price, pos.current_price, self.cfg.risk)
-            if reason and self._sell_all(sym, pos.qty, reason):
-                self.state.blocked.add(sym)
-                self.state.save()
+        for sl in self.sleeves:
+            for sym, held in list(self.ledger(sl).items()):
+                pos = acc.positions.get(sym)
+                if not pos:
+                    continue
+                reason = exit_reason(held["price"], pos.current_price, self.cfg.risk)
+                if reason and self._sell(sl, sym, acc, reason):
+                    self.state.blocked.add(sl.key(sym))
+                    self.state.save()
         limit = self.cfg.risk.max_daily_loss_pct
         if limit and acc.equity <= self.state.start_equity * (1 - limit):
             self.pause(f"하루 손실 한도 {limit:.0%} 도달 "
                        f"({self.state.start_equity:,.0f} → {acc.equity:,.0f}원)")
 
-    def portfolio_targets(self, today: pd.Timestamp) -> tuple[dict[str, int], bool, str]:
+    def portfolio_targets(self, sleeve: Sleeve, today: pd.Timestamp) -> tuple[dict[str, int], bool, str]:
         """듀얼 모멘텀: (목표 포지션, 거래일 여부, 보고용 모멘텀 요약)."""
+        strategy = sleeve.strategy
         closes, trading_day = {}, False
-        for sym in self.cfg.symbols:
+        for sym in sleeve.symbols:
             try:
-                df = self.broker.daily_ohlcv(sym, days=self.strategy.warmup + 30)
+                df = self.broker.daily_ohlcv(sym, days=strategy.warmup + 30)
             except Exception as e:
                 log.exception("%s 일봉 조회 실패", sym)
                 self.notify_error(f"{sym} 일봉 조회 실패: {e}")
                 continue
             trading_day |= bool((df.index >= today).any())
             closes[sym] = df.loc[df.index < today, "close"]
-        if len(closes) < len(self.cfg.symbols):
+        if len(closes) < len(sleeve.symbols):
             return {}, trading_day, ""  # 일부 종목 조회 실패 → 다음 점검 때 재시도
-        selected = self.strategy.select(closes)
-        mom = self.strategy.momentum(closes)
+        selected = strategy.select(closes)
+        mom = strategy.momentum(closes)
         note = "\n".join(f"· {s} {mom[s]:+.1%}{' ✅' if s in selected else ''}"
                          for s in sorted(mom, key=mom.get, reverse=True))
-        return {s: int(s in selected) for s in self.cfg.symbols}, trading_day, note
+        return {s: int(s in selected) for s in sleeve.symbols}, trading_day, note
 
-    def rebalance(self, now: datetime) -> None:
-        if getattr(self.strategy, "portfolio", False):
-            return self.rebalance_portfolio(now)
-        targets, trading_day = self.signals_for_today(pd.Timestamp(now.date()))
-        if not targets:
-            return  # 전 종목 조회 실패 → 다음 점검 때 재시도
-        if not trading_day:
-            self.state.holiday = True
-            self.state.save()
-            self.notify("오늘은 휴장일로 판단되어 매매하지 않습니다. (오늘 일봉 없음)")
-            return
+    def _apply_targets(self, sleeve: Sleeve, targets: dict[str, int], weight: float, reason: str) -> None:
         for sym, target in targets.items():
-            if target == 0 and sym in self.state.blocked:
+            if target == 0 and sleeve.key(sym) in self.state.blocked:
                 log.info("%s: 신호 해제로 재진입 금지 해제", sym)
-                self.state.blocked.discard(sym)
+                self.state.blocked.discard(sleeve.key(sym))
         self.state.save()
-
         acc = self.broker.account()
         for sym, target in targets.items():  # 매도 먼저
-            pos = acc.positions.get(sym)
-            if target == 0 and pos:
-                self._sell_all(sym, pos.qty, "매도 신호")
+            if target == 0 and sym in self.ledger(sleeve):
+                self._sell(sleeve, sym, acc, reason)
         acc = self.broker.account()
-        cash, equity = acc.cash, acc.equity
         for sym, target in targets.items():
-            if target == 1 and sym not in acc.positions and sym not in self.state.blocked:
-                if self._buy(sym, equity, cash):
+            if target == 1 and sym not in self.ledger(sleeve) and sleeve.key(sym) not in self.state.blocked:
+                equity, cash = self.budget(sleeve, acc)
+                if self._buy(sleeve, sym, equity, cash, weight):
                     acc = self.broker.account()
-                    cash = acc.cash
 
-        signal_text = ", ".join(f"{s}:{'보유' if t else '미보유'}" for s, t in targets.items())
-        flow_text = "".join(f"\n· {s} {n}" for s, n in self.flow_notes.items())
-        if flow_text:
-            flow_text = "\n\n수급 (최근 5일 순매수)" + flow_text
-        self.notify(f"☀️ 오늘의 매매 완료\n신호: {signal_text}{flow_text}\n\n주문 후 잔고\n"
-                    f"{format_account(self.broker.account(), self.state.start_equity)}")
-
-    def rebalance_portfolio(self, now: datetime) -> None:
-        month = now.strftime("%Y-%m")
-        if self.state.portfolio_month == month:
-            return  # 이번 달 리밸런싱 완료 — 다음 달 첫 거래일까지 대기 (손절 점검은 계속)
-        targets, trading_day, note = self.portfolio_targets(pd.Timestamp(now.date()))
-        if not targets:
-            return
-        if not trading_day:
-            self.state.holiday = True
+    def rebalance_sleeve(self, sleeve: Sleeve, now: datetime) -> str | None:
+        """슬리브 하나의 오늘 매매. 보고용 문구를 반환, 휴장일이면 None."""
+        today = pd.Timestamp(now.date())
+        strategy = sleeve.strategy
+        if getattr(strategy, "portfolio", False):
+            month = now.strftime("%Y-%m")
+            if self.state.portfolio_month.get(sleeve.name) == month:
+                return f"{sleeve.tag}이번 달 리밸런싱 완료 (다음: 다음 달 첫 거래일)"
+            targets, trading_day, note = self.portfolio_targets(sleeve, today)
+            if targets and not trading_day:
+                return None
+            if not targets:
+                return f"{sleeve.tag}데이터 조회 실패 — 다음에 재시도"
+            self._apply_targets(sleeve, targets, strategy.weight, "리밸런싱 제외")
+            self.state.portfolio_month[sleeve.name] = month
             self.state.save()
-            self.notify("오늘은 휴장일로 판단되어 매매하지 않습니다. (오늘 일봉 없음)")
-            return
-        for sym, target in targets.items():
-            if target == 0:
-                self.state.blocked.discard(sym)
+            held = [s for s, t in targets.items() if t] or ["없음 (전부 현금)"]
+            return (f"📅 {sleeve.tag}{month} 월간 리밸런싱 완료\n보유: {', '.join(held)}\n"
+                    f"최근 {strategy.lookback}거래일 수익률\n{note}")
+        self.flow_notes = {}
+        targets, trading_day = self.signals_for_today(sleeve, today)
+        if targets and not trading_day:
+            return None
+        if not targets:
+            return f"{sleeve.tag}데이터 조회 실패 — 다음에 재시도"
+        self._apply_targets(sleeve, targets, self.cfg.risk.max_position_pct, "매도 신호")
+        text = f"{sleeve.tag}신호: " + ", ".join(f"{s}:{'보유' if t else '미보유'}" for s, t in targets.items())
+        if self.flow_notes:
+            text += "\n수급 (최근 5일 순매수)" + "".join(f"\n· {s} {n}" for s, n in self.flow_notes.items())
+        return text
+
+    def rebalance(self, now: datetime) -> None:
+        parts = []
+        for sleeve in self.sleeves:
+            part = self.rebalance_sleeve(sleeve, now)
+            if part is None:
+                self.state.holiday = True
+                self.state.save()
+                self.notify("오늘은 휴장일로 판단되어 매매하지 않습니다. (오늘 일봉 없음)")
+                return
+            parts.append(part)
         acc = self.broker.account()
-        for sym, target in targets.items():
-            pos = acc.positions.get(sym)
-            if target == 0 and pos:
-                self._sell_all(sym, pos.qty, "리밸런싱 제외")
-        acc = self.broker.account()
-        cash, equity = acc.cash, acc.equity
-        for sym, target in targets.items():
-            if target == 1 and sym not in acc.positions and sym not in self.state.blocked:
-                if self._buy(sym, equity, cash, weight=self.strategy.weight):
-                    cash = self.broker.account().cash
-        self.state.portfolio_month = month
-        self.state.save()
-        held = [s for s, t in targets.items() if t] or ["없음 (전부 현금)"]
-        self.notify(f"📅 {month} 월간 리밸런싱 완료\n보유: {', '.join(held)}\n\n"
-                    f"최근 {self.strategy.lookback}거래일 수익률\n{note}\n\n주문 후 잔고\n"
-                    f"{format_account(self.broker.account(), self.state.start_equity)}")
+        title = "☀️ 오늘의 매매 완료"
+        if len(self.sleeves) == 1 and parts[0].startswith("📅"):
+            title, parts = parts[0].split("\n", 1)[0], [parts[0].split("\n", 1)[1]]
+        self.notify(f"{title}\n" + "\n\n".join(parts) + "\n\n주문 후 잔고\n"
+                    f"{format_account(acc, self.state.start_equity)}{self.sleeve_summary(acc)}")
+
+    def sleeve_summary(self, acc: Account) -> str:
+        if len(self.sleeves) == 1:
+            return ""
+        lines = ["\n\n전략별 현황"]
+        for sl in self.sleeves:
+            equity, _ = self.budget(sl, acc)
+            items = []
+            value = 0.0
+            for sym, h in self.ledger(sl).items():
+                cur = acc.positions[sym].current_price if sym in acc.positions else h["price"]
+                value += h["qty"] * cur
+                items.append(f"{sym} {h['qty']}주 ({cur / h['price'] - 1:+.1%})")
+            lines.append(f"[{sl.name}] {sl.strategy.name} 비중 {sl.weight:.0%} · 투자 {value:,.0f}원 / "
+                         f"한도 {equity:,.0f}원")
+            lines.append("· " + (", ".join(items) if items else "보유 없음"))
+        return "\n".join(lines)
 
     def status_text(self) -> str:
         state = f"⛔ 일시정지 ({self.state.pause_reason})" if self.state.paused else "✅ 정상 작동"
         try:
-            acc_text = format_account(self.broker.account(), self.state.start_equity)
+            acc = self.broker.account()
+            acc_text = format_account(acc, self.state.start_equity) + self.sleeve_summary(acc)
         except Exception as e:
             acc_text = f"계좌 조회 실패: {e}"
-        return (f"{state}\n전략 {self.strategy.name} · 종목 {', '.join(self.cfg.symbols)}\n"
+        return (f"{state}\n{self.describe()}\n"
                 f"오늘 주문 {self.state.orders}회 · 리밸런싱 {'완료' if self.state.rebalanced else '대기'}\n\n"
                 f"{acc_text}")
+
+    def describe(self) -> str:
+        return "\n".join(f"{sl.tag}전략 {sl.strategy.name}" + (f" 비중 {sl.weight:.0%}" if sl.name else "")
+                         + f" · 종목 {', '.join(sl.symbols)}" for sl in self.sleeves)
 
     def handle_command(self, cmd: str) -> None:
         if cmd == "/stop":
@@ -347,7 +450,8 @@ class TradingBot:
                 and not self.state.close_reported and not self.state.holiday):
             self.state.close_reported = True
             self.state.save()
-            self.notify(f"🌙 장 마감 보고\n{format_account(self.broker.account(), self.state.start_equity)}")
+            acc = self.broker.account()
+            self.notify(f"🌙 장 마감 보고\n{format_account(acc, self.state.start_equity)}{self.sleeve_summary(acc)}")
         if not is_market_open(now) or self.state.holiday or self.state.paused:
             return
         self.check_risk(self.broker.account())
@@ -357,11 +461,9 @@ class TradingBot:
             self.state.save()
 
     def run_forever(self) -> None:
-        log.info("자동매매 시작: 종목=%s 전략=%s 점검주기=%ds",
-                 self.cfg.symbols, self.strategy.name, self.cfg.interval_sec)
+        log.info("자동매매 시작: %s 점검주기=%ds", self.describe(), self.cfg.interval_sec)
         paused = f"\n⛔ 현재 일시정지 상태 ({self.state.pause_reason}) — /start 로 재개" if self.state.paused else ""
-        self.notify(f"🤖 자동매매 봇 시작\n전략 {self.strategy.name} · 종목 {', '.join(self.cfg.symbols)}"
-                    f"{paused}\n\n{HELP}")
+        self.notify(f"🤖 자동매매 봇 시작\n{self.describe()}{paused}\n\n{HELP}")
         next_step = 0.0
         while True:
             if time.monotonic() >= next_step:

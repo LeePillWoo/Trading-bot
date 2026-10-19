@@ -117,6 +117,23 @@ python -m trading_bot run --broker api --once
 
 새 전략은 `strategy.Strategy`를 상속해 `signals(df) -> Series[0/1]`을 구현하고 `STRATEGIES`에 등록하면 됩니다. t일 신호는 t일 종가까지의 데이터만 사용해야 합니다 (`tests/test_strategy_backtest.py::test_no_lookahead`가 검증).
 
+## 장기 + 적극 나눠서 운용 (슬리브)
+
+계좌를 비중별로 나눠 두 전략을 동시에 돌립니다. 각 전략은 자기가 산 수량을 장부에 따로 기록하고 자기 몫만 팝니다 (같은 종목을 둘 다 사도 섞이지 않음).
+
+```bash
+# 장기 70%: 대형주 12개 듀얼 모멘텀(상위 3개) / 적극 30%: breakout
+python -m trading_bot run --broker api --strategy breakout --symbols 005930 000660 035420 \
+    --core-strategy dual_momentum --core-param top_n=3 --core-weight 0.7 \
+    --core-symbols 005930 000660 005380 000270 068270 035420 035720 051910 006400 105560 055550 012330
+
+# 같은 구성 백테스트 (합계 + 전략별)
+python -m trading_bot backtest --fetch --days 990 --slippage 0.001 --strategy breakout --symbols ... \
+    --core-strategy dual_momentum --core-param top_n=3 --core-symbols ...
+```
+
+설정 마법사(`setup`)의 "운용 방식: 2"로도 설정할 수 있습니다.
+
 ## 비용 가정
 
 수수료 0.015%, 매도 시 거래세 0.20% (`config.BotConfig`). 실제 증권사 수수료와 시장/연도별 세율에 맞게 수정하세요.

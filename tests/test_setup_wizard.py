@@ -31,7 +31,7 @@ def run(tmp_path, answers, monkeypatch):
 
 
 def test_full_paper_setup(tmp_path, monkeypatch):
-    code, env = run(tmp_path, ["KEY", "SECRET", "", "TGTOKEN", "", "005930 035420", ""], monkeypatch)
+    code, env = run(tmp_path, ["KEY", "SECRET", "", "TGTOKEN", "", "005930 035420", "", ""], monkeypatch)
     assert code == 0
     assert env["NHPLUG_APP_KEY"] == "KEY" and env["NHPLUG_MODE"] == "paper"
     assert env["NHPLUG_ACCOUNT"] == "33333333303"  # 모의투자(03) 계좌 자동 선택
@@ -42,16 +42,16 @@ def test_full_paper_setup(tmp_path, monkeypatch):
 
 
 def test_rerun_keeps_values(tmp_path, monkeypatch):
-    run(tmp_path, ["KEY", "SECRET", "", "TGTOKEN", "", "", "3"], monkeypatch)
-    code, env = run(tmp_path, ["", "", "", "", "", "", ""], monkeypatch)
+    run(tmp_path, ["KEY", "SECRET", "", "TGTOKEN", "", "", "", "3"], monkeypatch)
+    code, env = run(tmp_path, ["", "", "", "", "", "", "", ""], monkeypatch)
     assert "--strategy sma " in env["BOT_ARGS"] + " "  # 기존 선택 유지
     assert code == 0 and env["NHPLUG_APP_KEY"] == "KEY" and env["TELEGRAM_CHAT_ID"] == "4242"
 
 
 def test_real_requires_confirmation(tmp_path, monkeypatch):
-    code, env = run(tmp_path, ["K", "S", "2", "아니", "", "", ""], monkeypatch)
+    code, env = run(tmp_path, ["K", "S", "2", "아니", "", "", "", ""], monkeypatch)
     assert env["NHPLUG_MODE"] == "paper"
-    code, env = run(tmp_path, ["", "", "2", "실전", "", "", "", ""], monkeypatch)
+    code, env = run(tmp_path, ["", "", "2", "실전", "", "", "", "", ""], monkeypatch)
     assert env["NHPLUG_MODE"] == "real" and env["NHPLUG_ACCOUNT"] == "11111111101"
     assert env["BOT_ARGS"].endswith("--confirm-real")
 
@@ -81,3 +81,19 @@ def test_network_error_message(tmp_path, monkeypatch, capsys):
 def test_wrong_telegram_account_rejected(tmp_path, monkeypatch):
     code, env = run(tmp_path, ["KEY", "SECRET", "", "TGTOKEN", "n"], monkeypatch)
     assert code == 1 and "TELEGRAM_CHAT_ID" not in env
+
+
+def test_split_mode_setup(tmp_path, monkeypatch):
+    code, env = run(tmp_path, ["K", "S", "", "", "", "2", "1", "0.6", ""], monkeypatch)
+    assert code == 0
+    args = env["BOT_ARGS"]
+    assert "--strategy breakout" in args and "--core-strategy dual_momentum" in args
+    assert "--core-weight 0.6" in args and "--core-param top_n=3" in args
+    assert "--core-symbols 005930 000660 005380" in args
+    # 다시 실행하면 나눠서 운용이 기본값으로 유지
+    code, env2 = run(tmp_path, ["", "", "", "", "", "", "", "", ""], monkeypatch)
+    assert env2["BOT_ARGS"] == args
+    # BOT_ARGS 가 실제 실행 옵션으로 파싱되는지
+    from trading_bot.__main__ import build_parser
+    ns = build_parser().parse_args(["run", "--broker", "api", *args.split()])
+    assert ns.core_symbols[:2] == ["005930", "000660"] and ns.core_weight == 0.6
