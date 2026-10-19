@@ -58,6 +58,7 @@ class BacktestResult:
         }
         if self.benchmark is not None:
             out["단순보유수익률"] = float(self.benchmark.iloc[-1] / self.benchmark.iloc[0] - 1)
+            out["단순보유MDD"] = float((self.benchmark / self.benchmark.cummax() - 1).min())
         return out
 
 

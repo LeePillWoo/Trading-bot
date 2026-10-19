@@ -193,7 +193,7 @@ def cmd_backtest(args, strategy, risk, cfg) -> int:
         print(f"{'전략':<10}{'수익률':>9}{'MDD':>9}{'거래':>6}{'승률':>8}")
         for name, st in rows:
             print(f"{name:<10}{st['총수익률']:>9.1%}{st['최대낙폭(MDD)']:>9.1%}{st['거래횟수']:>6}{st['승률']:>8.0%}")
-        print(f"{'단순보유':<10}{first['단순보유수익률']:>9.1%}")
+        print(f"{'단순보유':<10}{first['단순보유수익률']:>9.1%}{first['단순보유MDD']:>9.1%}")
         return 0
 
     if strategy.needs_flow and not has_flow:
