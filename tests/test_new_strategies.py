@@ -100,3 +100,13 @@ def test_cli_rejects_vb_live():
     from trading_bot.__main__ import main
     with pytest.raises(ValueError, match="백테스트 전용"):
         main(["run", "--strategy", "vb"])
+
+
+def test_sell_tax_option_reaches_backtest(capsys):
+    from trading_bot.__main__ import main
+    main(["backtest", "--demo", "--days", "300", "--strategy", "vb", "--symbols", "A"])
+    taxed = capsys.readouterr().out
+    main(["backtest", "--demo", "--days", "300", "--strategy", "vb", "--symbols", "A", "--sell-tax", "0"])
+    untaxed = capsys.readouterr().out
+    final = lambda out: int(next(l for l in out.splitlines() if "최종자산" in l).split(":")[1].replace(",", ""))
+    assert final(untaxed) > final(taxed)

@@ -89,6 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--max-daily-loss", type=float, default=0.03,
                         help="하루 손실 한도, 도달하면 일시정지 (0이면 미사용)")
         sp.add_argument("--cash", type=float, default=10_000_000, help="초기 자금 (백테스트/가상매매)")
+        sp.add_argument("--sell-tax", type=float, default=0.002,
+                        help="매도 시 거래세 (주식 0.002, 국내 ETF 는 0)")
 
     sub.add_parser("setup", help="대화형 설정 마법사 (.env 생성)")
     sub.add_parser("telegram-setup", help="텔레그램 봇 연결 확인 및 chat_id 찾기")
@@ -238,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     strategy = make_strategy(args.strategy, **parse_params(args.param))
     risk = RiskConfig(max_position_pct=args.max_position, stop_loss_pct=args.stop_loss,
                       take_profit_pct=args.take_profit, max_daily_loss_pct=args.max_daily_loss)
-    cfg = BotConfig(symbols=args.symbols, strategy=args.strategy, risk=risk)
+    cfg = BotConfig(symbols=args.symbols, strategy=args.strategy, risk=risk, sell_tax=args.sell_tax)
 
     if args.command == "backtest":
         return cmd_backtest(args, strategy, risk, cfg)
