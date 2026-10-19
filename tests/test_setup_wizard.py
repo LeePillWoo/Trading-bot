@@ -60,3 +60,18 @@ def test_save_env_preserves_comments(tmp_path):
     p.write_text("# 주석\nA=1\nB=2\n")
     save_env(p, {"B": "3", "C": "4"})
     assert p.read_text() == "# 주석\nA=1\nB=3\nC=4\n"
+
+
+def test_network_error_message(tmp_path, monkeypatch, capsys):
+    import requests
+
+    class Down:
+        def list_accounts(self):
+            raise requests.ConnectionError("reset")
+
+    for k in ("NHPLUG_APP_KEY", "NHPLUG_APP_SECRET"):
+        monkeypatch.delenv(k, raising=False)
+    it = iter(["K", "S", ""])
+    w = Wizard(tmp_path / ".env", ask=lambda _: next(it), broker_factory=Down)
+    assert w.run() == 1
+    assert "네트워크" in capsys.readouterr().out

@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
+import requests
+
 from .notify import TelegramNotifier
 
 DEFAULT_BOT_ARGS = "--symbols 005930 000660 --strategy sma --max-position 0.2 --stop-loss 0.07 --max-daily-loss 0.03"
@@ -101,6 +103,10 @@ class Wizard:
         try:
             broker = self._broker()
             accounts = broker.list_accounts()
+        except requests.RequestException as e:
+            print(f"  ❌ 나무증권 서버에 접속하지 못했습니다 (네트워크): {e}\n"
+                  "  서버 인터넷 연결을 확인하고 잠시 후 다시 실행하세요.")
+            return 1
         except Exception as e:
             print(f"  ❌ 나무증권 연결 실패: {e}\n  앱키/시크릿을 확인하고 다시 실행하세요.")
             return 1
