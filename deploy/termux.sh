@@ -6,8 +6,17 @@ cd "$(dirname "$0")/.."
 
 echo "== 1/4 패키지 설치 (처음엔 5~10분 걸립니다)"
 yes | pkg upgrade -y || true
-pkg install -y tur-repo
-pkg install -y python python-numpy python-pandas python-pip procps
+dpkg --configure -a || true          # 업그레이드 중 끊긴 설치 마무리
+pkg install -y tur-repo              # pandas 가 있는 Termux 사용자 저장소
+pkg update -y                        # 새 저장소 목록 받기
+pkg install -y python python-numpy python-pip procps
+has_pandas() { python -c "import pandas" 2>/dev/null; }
+has_pandas || pkg install -y python-pandas || true
+if ! has_pandas; then
+  echo "   pandas 패키지가 없어 직접 빌드합니다 (10~30분 걸릴 수 있음)"
+  pkg install -y clang make ninja binutils
+  pip install pandas 2>/dev/null || pip install --break-system-packages pandas
+fi
 pip install -q requests tzdata 2>/dev/null || pip install -q --break-system-packages requests tzdata
 python -c "import pandas, numpy, requests, zoneinfo; zoneinfo.ZoneInfo('Asia/Seoul'); print('   패키지 OK')"
 
