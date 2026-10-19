@@ -84,16 +84,23 @@ def test_wrong_telegram_account_rejected(tmp_path, monkeypatch):
 
 
 def test_split_mode_setup(tmp_path, monkeypatch):
-    code, env = run(tmp_path, ["K", "S", "", "", "", "2", "1", "0.6", ""], monkeypatch)
+    code, env = run(tmp_path, ["K", "S", "", "", "", "2", "1", "0.6", "2", ""], monkeypatch)
     assert code == 0
     args = env["BOT_ARGS"]
     assert "--strategy breakout" in args and "--core-strategy dual_momentum" in args
     assert "--core-weight 0.6" in args and "--core-param top_n=3" in args
     assert "--core-symbols 005930 000660 005380" in args
     # 다시 실행하면 나눠서 운용이 기본값으로 유지
-    code, env2 = run(tmp_path, ["", "", "", "", "", "", "", "", ""], monkeypatch)
+    code, env2 = run(tmp_path, ["", "", "", "", "", "", "", "", "", ""], monkeypatch)
     assert env2["BOT_ARGS"] == args
     # BOT_ARGS 가 실제 실행 옵션으로 파싱되는지
     from trading_bot.__main__ import build_parser
     ns = build_parser().parse_args(["run", "--broker", "api", *args.split()])
     assert ns.core_symbols[:2] == ["005930", "000660"] and ns.core_weight == 0.6
+
+
+def test_split_mode_auto_universe(tmp_path, monkeypatch):
+    code, env = run(tmp_path, ["K", "S", "", "", "", "2", "1", "", "", "15"], monkeypatch)
+    assert code == 0 and "--core-top 15" in env["BOT_ARGS"]
+    code, env2 = run(tmp_path, [""] * 10, monkeypatch)
+    assert env2["BOT_ARGS"] == env["BOT_ARGS"]

@@ -7,3 +7,4 @@ logs/
 .pytest_cache/
 bot_state_*.json
 .nhplug_token.json
+.cache/

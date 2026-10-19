@@ -38,6 +38,8 @@ def format_bot_args(ns) -> str:
     if ns.core_strategy:
         parts += ["--core-strategy", ns.core_strategy, "--core-weight", f"{ns.core_weight:g}",
                   "--core-symbols", *(ns.core_symbols or ns.symbols)]
+        if ns.core_top:
+            parts += ["--core-top", str(ns.core_top)]
         if ns.core_param:
             parts += ["--core-param", *ns.core_param]
     for opt, default in (("api", "namuh"), ("interval", 300), ("trade_time", "09:05"), ("sell_tax", 0.002)):
@@ -205,8 +207,15 @@ class Wizard:
             ns.core_strategy = "dual_momentum"
             ns.core_param = ns.core_param or ["top_n=3"]
             ns.core_weight = float(self.ask("  장기 비중 (0~1)", default=str(ns.core_weight)))
-            ns.core_symbols = self.ask("  장기 후보 종목 (5~15개 권장)",
-                                       default=" ".join(ns.core_symbols or CORE_SYMBOLS)).split()
+            auto = self.ask("  장기 후보: 1=코스피 시총 상위 자동 갱신(추천), 2=직접 입력",
+                            default="2" if ns.core_symbols and not ns.core_top else "1") != "2"
+            if auto:
+                ns.core_top = int(self.ask("  시총 상위 몇 개를 후보로? (10~30 권장)", default=str(ns.core_top or 20)))
+                ns.core_symbols = ns.core_symbols or CORE_SYMBOLS  # 자동 갱신 실패 시 예비 후보
+            else:
+                ns.core_top = 0
+                ns.core_symbols = self.ask("  장기 후보 종목 (5~15개 권장)",
+                                           default=" ".join(ns.core_symbols or CORE_SYMBOLS)).split()
         else:
             ns.core_strategy = None
             if ns.strategy == "dual_momentum" and len(ns.symbols) < 4:

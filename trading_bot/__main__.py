@@ -93,6 +93,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="장기 전략을 따로 운용 (예: dual_momentum). 지정하면 계좌를 장기/적극으로 나눔")
         sp.add_argument("--core-symbols", nargs="+", help="장기 전략 후보 종목")
         sp.add_argument("--core-weight", type=float, default=0.7, help="장기 전략 비중 (기본 0.7)")
+        sp.add_argument("--core-top", type=int, default=0,
+                        help="장기 후보를 코스피 시가총액 상위 N 종목으로 매달 자동 갱신 (0이면 --core-symbols 고정)")
         sp.add_argument("--core-param", nargs="*", default=[], metavar="KEY=VALUE", help="장기 전략 파라미터")
         sp.add_argument("--slippage", type=float, default=0.0,
                         help="백테스트 체결 불리함 (예: 0.001 = 매수/매도 각 0.1%%)")
@@ -210,6 +212,11 @@ def cmd_backtest_sleeves(args, strategy, risk, cfg) -> int:
 
     core = make_strategy(args.core_strategy, **parse_params(args.core_param))
     core_syms = args.core_symbols or args.symbols
+    if args.core_top:
+        from .universe import kospi_top_symbols
+        core_syms, names = kospi_top_symbols(args.core_top)
+        print(f"장기 후보: 오늘 기준 코스피 시총 상위 {args.core_top} — {', '.join(names.values())}")
+        print("(과거 시점의 상위 종목이 아니라 지금 상위 종목으로 계산하므로 결과가 실제보다 좋게 나올 수 있음)\n")
     data = load_data(args, list(dict.fromkeys(core_syms + args.symbols)))
     w = args.core_weight
     kw = dict(risk=risk, commission=cfg.commission, sell_tax=cfg.sell_tax, slippage=args.slippage)
@@ -320,7 +327,8 @@ def main(argv: list[str] | None = None) -> int:
         core = make_strategy(args.core_strategy, **parse_params(args.core_param))
         if getattr(core, "intraday", False):
             raise ValueError(f"{core.name} 은 아직 백테스트 전용입니다 (실매매 미지원)")
-        plan = [Sleeve(core, args.core_symbols or args.symbols, args.core_weight, "장기"),
+        plan = [Sleeve(core, args.core_symbols or args.symbols, args.core_weight, "장기",
+                       universe_top=args.core_top),
                 Sleeve(strategy, args.symbols, 1 - args.core_weight, "적극")]
     bot = TradingBot(broker, plan, cfg, state_path=state_path, trade_time=dtime(hh, mm),
                      notifier=make_notifier(), label=label)

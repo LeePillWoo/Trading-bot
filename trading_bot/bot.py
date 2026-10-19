@@ -55,6 +55,7 @@ class Sleeve:
     symbols: list[str]
     weight: float = 1.0
     name: str = ""  # 여러 개일 때 "장기"/"적극" 등. 하나면 빈 문자열
+    universe_top: int = 0  # >0 이면 리밸런싱마다 후보를 코스피 시총 상위 N 으로 자동 갱신
 
     def key(self, symbol: str) -> str:
         """재진입 금지(blocked) 기록용 키."""
@@ -82,6 +83,8 @@ class BotState:
         self.portfolio_month: dict[str, str] = months if isinstance(months, dict) else {"": months}
         # 슬리브별 보유 장부: {슬리브: {종목: {"qty": 수량, "price": 매수가}}}. None 이면 아직 초기화 전
         self.holdings: dict[str, dict[str, dict]] | None = data.get("holdings")
+        # 슬리브별 마지막으로 자동 선정한 후보 종목
+        self.universe: dict[str, list[str]] = data.get("universe", {})
         self.blocked: set[str] = set(data.get("blocked", []))
         # 일시정지는 날짜가 바뀌어도 유지 (사람이 /start 로 풀어야 함)
         self.paused: bool = data.get("paused", False)
@@ -101,6 +104,7 @@ class BotState:
             "start_equity": self.start_equity, "blocked": sorted(self.blocked),
             "paused": self.paused, "pause_reason": self.pause_reason,
             "portfolio_month": self.portfolio_month, "holdings": self.holdings,
+            "universe": self.universe,
         }, ensure_ascii=False, indent=2))
 
 
@@ -129,11 +133,18 @@ def format_account(acc: Account, start_equity: float = 0.0) -> str:
 class TradingBot:
     def __init__(self, broker: Broker, strategy: Strategy | list[Sleeve], config: BotConfig,
                  state_path: str | Path = "bot_state.json", trade_time: dtime = dtime(9, 5),
-                 notifier: Notifier | None = None, label: str = ""):
+                 notifier: Notifier | None = None, label: str = "", universe_loader=None):
         self.broker = broker
         self.sleeves = strategy if isinstance(strategy, list) else [Sleeve(strategy, list(config.symbols))]
+        if universe_loader is None:
+            from .universe import kospi_top_symbols as universe_loader
+        self.universe_loader = universe_loader
+        self.names: dict[str, str] = {}
         self.cfg = config
         self.state = BotState(state_path)
+        for sl in self.sleeves:  # 재시작 시 마지막 자동 선정 후보 복원
+            if sl.universe_top and self.state.universe.get(sl.name):
+                sl.symbols = list(self.state.universe[sl.name])
         self.trade_time = trade_time
         self.notifier = notifier or Notifier()
         self.label = label
@@ -329,9 +340,34 @@ class TradingBot:
             return {}, trading_day, ""  # 일부 종목 조회 실패 → 다음 점검 때 재시도
         selected = strategy.select(closes)
         mom = strategy.momentum(closes)
-        note = "\n".join(f"· {s} {mom[s]:+.1%}{' ✅' if s in selected else ''}"
+        note = "\n".join(f"· {self.label_of(s)} {mom[s]:+.1%}{' ✅' if s in selected else ''}"
                          for s in sorted(mom, key=mom.get, reverse=True))
         return {s: int(s in selected) for s in sleeve.symbols}, trading_day, note
+
+    def refresh_universe(self, sleeve: Sleeve) -> str:
+        """후보 종목을 코스피 시총 상위 N 으로 갱신. 보고용 문구 반환."""
+        try:
+            symbols, names = self.universe_loader(sleeve.universe_top)
+        except Exception as e:
+            log.exception("후보 종목 갱신 실패")
+            self.notify_error(f"{sleeve.tag}후보 종목 자동 갱신 실패, 기존 후보 사용: {e}")
+            return ""
+        if not symbols:
+            return ""
+        self.names.update(names)
+        added = [s for s in symbols if s not in sleeve.symbols]
+        removed = [s for s in sleeve.symbols if s not in symbols]
+        sleeve.symbols = list(symbols)
+        self.state.universe[sleeve.name] = list(symbols)
+        self.state.save()
+        head = f"후보 갱신: 코스피 시총 상위 {sleeve.universe_top}"
+        if not added and not removed:
+            return head + " (변동 없음)"
+        return (head + "".join([f"\n  편입 {', '.join(self.label_of(s) for s in added)}" if added else "",
+                                f"\n  제외 {', '.join(self.label_of(s) for s in removed)}" if removed else ""]))
+
+    def label_of(self, symbol: str) -> str:
+        return f"{self.names[symbol]}({symbol})" if symbol in self.names else symbol
 
     def _apply_targets(self, sleeve: Sleeve, targets: dict[str, int], weight: float, reason: str) -> None:
         for sym, target in targets.items():
@@ -358,17 +394,22 @@ class TradingBot:
             month = now.strftime("%Y-%m")
             if self.state.portfolio_month.get(sleeve.name) == month:
                 return f"{sleeve.tag}이번 달 리밸런싱 완료 (다음: 다음 달 첫 거래일)"
+            universe_note = self.refresh_universe(sleeve) if sleeve.universe_top else ""
             targets, trading_day, note = self.portfolio_targets(sleeve, today)
             if targets and not trading_day:
                 return None
             if not targets:
                 return f"{sleeve.tag}데이터 조회 실패 — 다음에 재시도"
+            for sym in self.ledger(sleeve):  # 후보에서 빠진 보유 종목은 정리
+                targets.setdefault(sym, 0)
             self._apply_targets(sleeve, targets, strategy.weight, "리밸런싱 제외")
             self.state.portfolio_month[sleeve.name] = month
             self.state.save()
             held = [s for s, t in targets.items() if t] or ["없음 (전부 현금)"]
+            held = [self.label_of(s) if s in self.names else s for s in held]
             return (f"📅 {sleeve.tag}{month} 월간 리밸런싱 완료\n보유: {', '.join(held)}\n"
-                    f"최근 {strategy.lookback}거래일 수익률\n{note}")
+                    + (f"{universe_note}\n" if universe_note else "")
+                    + f"최근 {strategy.lookback}거래일 수익률\n{note}")
         self.flow_notes = {}
         targets, trading_day = self.signals_for_today(sleeve, today)
         if targets and not trading_day:
@@ -428,7 +469,8 @@ class TradingBot:
 
     def describe(self) -> str:
         return "\n".join(f"{sl.tag}전략 {sl.strategy.name}" + (f" 비중 {sl.weight:.0%}" if sl.name else "")
-                         + f" · 종목 {', '.join(sl.symbols)}" for sl in self.sleeves)
+                         + (f" · 후보 코스피 시총 상위 {sl.universe_top} (매달 자동 갱신)" if sl.universe_top
+                            else f" · 종목 {', '.join(sl.symbols)}") for sl in self.sleeves)
 
     def handle_command(self, cmd: str) -> None:
         if cmd == "/stop":
