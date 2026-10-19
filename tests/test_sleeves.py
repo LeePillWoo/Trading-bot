@@ -104,3 +104,24 @@ def test_switching_to_split_mode_moves_holdings(tmp_path):
     split.step(datetime(2026, 10, 20, 9, 10, tzinfo=KST))
     assert split.state.holdings["적극"]["A"]["qty"] == 2000  # 기존 보유분은 적극 장부로
     assert "" not in split.state.holdings
+
+
+def test_zero_balance_skips_without_marking_month(tmp_path):
+    from trading_bot.strategy import DualMomentumStrategy
+    idx = pd.bdate_range("2026-08-01", "2026-10-19")
+    c = pd.Series(range(100, 100 + len(idx)), index=idx, dtype=float)
+    df = pd.DataFrame({"open": c, "high": c, "low": c, "close": c, "volume": 1.0})
+    broker = PaperBroker(cash=0, prices={"A": df}, commission=0, sell_tax=0)
+    cfg = BotConfig(symbols=["A"], risk=RiskConfig(max_daily_loss_pct=0), commission=0)
+    rec = Recorder()
+    bot = TradingBot(broker, [Sleeve(DualMomentumStrategy(lookback=10, top_n=1, rf=0), ["A"], 0.7, "장기"),
+                              Sleeve(Fixed(1), ["A"], 0.3, "적극")], cfg,
+                     state_path=tmp_path / "s.json", notifier=rec)
+    bot.step(AM)
+    assert any("총자산이 0원" in m for m in rec.messages)
+    assert bot.state.portfolio_month == {}
+    # 자금이 들어온 다음 거래일엔 정상 리밸런싱
+    broker.cash = 1_000_000
+    bot.state.rebalanced = False
+    bot.step(AM)
+    assert "A" in bot.state.holdings["장기"]

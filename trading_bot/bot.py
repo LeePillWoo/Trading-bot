@@ -424,6 +424,12 @@ class TradingBot:
         return text
 
     def rebalance(self, now: datetime) -> None:
+        acc = self.broker.account()
+        if acc.equity <= 0:
+            # 아무것도 못 사는데 '이번 달 리밸런싱 완료'로 기록되면 자금이 들어와도 다음 달까지 대기하게 됨
+            self.notify("⚠️ 계좌 총자산이 0원이라 오늘 매매를 건너뜁니다. "
+                        "자금이 들어오면 다음 거래일 09:05에 자동으로 진행합니다.")
+            return
         parts = []
         for sleeve in self.sleeves:
             part = self.rebalance_sleeve(sleeve, now)
