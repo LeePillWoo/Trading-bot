@@ -41,5 +41,10 @@ def synthetic_ohlcv(days: int = 500, start_price: float = 50_000, seed: int = 0,
     high = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, vol / 2, days)))
     low = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, vol / 2, days)))
     volume = rng.integers(100_000, 1_000_000, days).astype(float)
-    return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume},
-                        index=dates)
+    # 데모용 수급: 같은 날 수익률과 약하게 연동된 외국인/기관 순매수 (미래 정보는 쓰지 않음)
+    ret = np.diff(np.log(close), prepend=np.log(start_price))
+    foreign = (ret / vol * 20_000 + rng.normal(0, 30_000, days)).round()
+    institution = (ret / vol * 10_000 + rng.normal(0, 20_000, days)).round()
+    return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume,
+                         "foreign": foreign, "institution": institution, "individual": -(foreign + institution),
+                         "program": 0.0}, index=dates)

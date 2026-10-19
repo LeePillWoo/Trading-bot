@@ -71,6 +71,11 @@ python -m trading_bot backtest --fetch --symbols 005930 000660 --days 500 \
 
 출력: 총수익률, CAGR, MDD, 샤프지수, 거래횟수, 승률, 단순보유 대비 수익률.
 
+전략 비교 (같은 데이터로 모든 전략을 한 표로):
+```bash
+python -m trading_bot backtest --fetch --compare --symbols 005930 000660
+```
+
 ## 2. 자동매매 실행
 
 ```bash
@@ -103,6 +108,7 @@ python -m trading_bot run --broker api --once
 
 | 이름 | 설명 | 파라미터 (기본값) |
 |---|---|---|
+| `sma_flow` (기본, 추천) | 상승 추세(단기 이평 > 장기 이평) **이고** 최근 N일 외국인+기관 순매수 합계 > 0 이면 매수, 추세 이탈 시 매도 (나무증권 수급 데이터 필요) | `short=5 long=20 flow_days=5` |
 | `sma` | 단기 이평 > 장기 이평이면 보유 | `short=5 long=20` |
 | `rsi` | RSI < 과매도 매수, RSI > 과매수 매도 | `period=14 oversold=30 overbought=70` |
 | `breakout` | N일 고가 돌파 매수, M일 저가 이탈 매도 | `entry=20 exit=10` |

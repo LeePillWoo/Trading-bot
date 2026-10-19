@@ -45,6 +45,11 @@ class FakeServer:
                 {"bsop_date": "20261015", "stck_oprc": "95", "stck_hgpr": "101", "stck_lwpr": "94",
                  "stck_prpr": "100", "vol": "900"},
             ]})
+        if url.endswith("/currentInvestor"):
+            return Resp({"Output_0": [
+                {"bsop_date1": "20261016", "frgn_ntby_qty": "-1,500", "gigwan": "2000", "person": "-500", "program": "0"},
+                {"bsop_date1": "20261015", "frgn_ntby_qty": "3000", "gigwan": "-100", "person": "-2900", "program": "10"},
+            ]})
         if url.endswith("/currentPrice"):
             return Resp({"Output_0": {"stck_prpr": "71000"}})
         if url.endswith("/balance"):
@@ -214,3 +219,13 @@ def test_bot_trades_through_namuh(tmp_path):
     assert len(buys) == 1 and buys[0][2]["iem_cd"] == "000660"
     # 총자산(250,000 + 3*71,000) * 50% / 71,000 = 3주
     assert buys[0][2]["orr_qty"] == 3
+
+
+def test_investor_flow(tmp_path):
+    b = make(tmp_path)
+    df = b.investor_flow("005930", days=10)
+    assert list(df.index.strftime("%Y%m%d")) == ["20261015", "20261016"]
+    assert list(df["foreign"]) == [3000, -1500] and list(df["institution"]) == [-100, 2000]
+    url, _, body = b.session.calls[-1]
+    assert url.startswith("https://api.nhplug.com:8443/krstock/quote/v1/currentInvestor")
+    assert body == {"market_cd": "KRX", "iem_cd": "005930", "array_cnt": "10"}

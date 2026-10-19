@@ -27,6 +27,7 @@ pkg update -y && pkg install -y git && (git -C ~/Trading-bot pull || git clone -
 |---|---|
 | 봇 켜기 | `bash ~/Trading-bot/deploy/termux-start.sh` |
 | 봇 끄기 | `bash ~/Trading-bot/deploy/termux-stop.sh` |
+| 전략 비교 백테스트 (실제 과거 데이터) | `cd ~/Trading-bot && python -m trading_bot backtest --fetch --compare --symbols 005930 000660` |
 | 로그 보기 | `tail -f ~/Trading-bot/logs/trading.log` (끝내기: Ctrl+C) |
 
 평소 확인·제어는 텔레그램 `/status` `/stop` `/start` 로 하면 됩니다. 09:05·15:35 보고가 안 오면 봇이 꺼진 것입니다.

@@ -72,7 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
     def common(sp):
         sp.add_argument("--api", choices=APIS, default="namuh",
                         help="증권사 API: namuh(나무증권/NH투자증권, 기본) | kis(한국투자증권)")
-        sp.add_argument("--strategy", default="sma", choices=sorted(STRATEGIES))
+        sp.add_argument("--strategy", default="sma_flow", choices=sorted(STRATEGIES),
+                        help="sma_flow(이동평균+수급, 기본) | sma | rsi | breakout")
         sp.add_argument("--param", nargs="*", default=[], metavar="KEY=VALUE",
                         help="전략 파라미터 (예: short=5 long=20)")
         sp.add_argument("--symbols", nargs="+", default=["005930"])
@@ -96,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     src.add_argument("--fetch", action="store_true", help="증권사 API(--api)로 일봉 조회")
     src.add_argument("--demo", action="store_true", help="랜덤 데이터로 데모 실행")
     bt.add_argument("--days", type=int, default=500)
+    bt.add_argument("--compare", action="store_true", help="모든 전략을 같은 데이터로 비교")
 
     run = sub.add_parser("run", help="자동매매 실행")
     common(run)
@@ -156,6 +158,56 @@ def service_argv() -> list[str]:
     return ["run", "--broker", "api", *shlex.split(os.environ.get("BOT_ARGS", ""))]
 
 
+def cmd_backtest(args, strategy, risk, cfg) -> int:
+    from .strategy import with_flow
+
+    if args.csv:
+        data = {Path(f).stem: load_csv(f) for f in args.csv}
+    elif args.fetch:
+        api, _ = make_api_broker(args.api, require_account=False)
+        data = {}
+        for s in args.symbols:
+            df = api.daily_ohlcv(s, args.days)
+            try:
+                df = with_flow(df, api.investor_flow(s, args.days))
+            except Exception as e:
+                print(f"({s} 수급 데이터 없음: {e})")
+            data[s] = df
+    else:
+        data = {s: synthetic_ohlcv(args.days, seed=i) for i, s in enumerate(args.symbols)}
+    has_flow = all("foreign" in df.columns for df in data.values())
+
+    def run(strat):
+        return run_backtest(data, strat, cash=args.cash, risk=risk,
+                            commission=cfg.commission, sell_tax=cfg.sell_tax).stats()
+
+    if args.compare:
+        rows = []
+        for name in STRATEGIES:
+            strat = make_strategy(name)
+            if strat.needs_flow and not has_flow:
+                continue
+            rows.append((name, run(strat)))
+        first = rows[0][1]
+        print(f"기간 {first['기간']} · 종목 {', '.join(data)}\n")
+        print(f"{'전략':<10}{'수익률':>9}{'MDD':>9}{'거래':>6}{'승률':>8}")
+        for name, st in rows:
+            print(f"{name:<10}{st['총수익률']:>9.1%}{st['최대낙폭(MDD)']:>9.1%}{st['거래횟수']:>6}{st['승률']:>8.0%}")
+        print(f"{'단순보유':<10}{first['단순보유수익률']:>9.1%}")
+        return 0
+
+    if strategy.needs_flow and not has_flow:
+        raise ValueError(f"{strategy.name} 전략은 투자자 수급 데이터가 필요합니다 (--fetch 또는 --demo)")
+    for k, v in run(strategy).items():
+        if k == "샤프지수":
+            print(f"{k:>14}: {v:.2f}")
+        elif isinstance(v, float):
+            print(f"{k:>14}: {v:.2%}")
+        else:
+            print(f"{k:>14}: {v:,}" if isinstance(v, int) else f"{k:>14}: {v}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["service"]:
@@ -179,23 +231,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = BotConfig(symbols=args.symbols, strategy=args.strategy, risk=risk)
 
     if args.command == "backtest":
-        if args.csv:
-            data = {Path(f).stem: load_csv(f) for f in args.csv}
-        elif args.fetch:
-            api, _ = make_api_broker(args.api, require_account=False)
-            data = {s: api.daily_ohlcv(s, args.days) for s in args.symbols}
-        else:
-            data = {s: synthetic_ohlcv(args.days, seed=i) for i, s in enumerate(args.symbols)}
-        result = run_backtest(data, strategy, cash=args.cash, risk=risk,
-                              commission=cfg.commission, sell_tax=cfg.sell_tax)
-        for k, v in result.stats().items():
-            if k == "샤프지수":
-                print(f"{k:>14}: {v:.2f}")
-            elif isinstance(v, float):
-                print(f"{k:>14}: {v:.2%}")
-            else:
-                print(f"{k:>14}: {v:,}" if isinstance(v, int) else f"{k:>14}: {v}")
-        return 0
+        return cmd_backtest(args, strategy, risk, cfg)
 
     # run
     from .bot import TradingBot

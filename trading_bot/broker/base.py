@@ -41,6 +41,10 @@ class Broker(ABC):
     def daily_ohlcv(self, symbol: str, days: int = 120) -> pd.DataFrame:
         """일봉 OHLCV (index: 날짜 오름차순, columns: open, high, low, close, volume)."""
 
+    def investor_flow(self, symbol: str, days: int = 120) -> pd.DataFrame:
+        """투자자별 일별 순매수량(주) (index: 날짜, columns: foreign, institution, individual, program)."""
+        raise NotImplementedError(f"{type(self).__name__} 는 투자자 수급 데이터를 지원하지 않습니다")
+
     @abstractmethod
     def current_price(self, symbol: str) -> float: ...
 

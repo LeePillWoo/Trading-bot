@@ -134,3 +134,29 @@ def test_service_argv_reads_bot_args(monkeypatch):
     assert argv[:3] == ["run", "--broker", "api"]
     args = build_parser().parse_args(argv)
     assert args.symbols == ["005930", "000660"] and args.stop_loss == 0.05
+
+
+def test_flow_strategy_report_and_missing_flow(tmp_path):
+    from trading_bot.strategy import SmaFlowStrategy
+
+    idx = pd.bdate_range("2026-09-01", "2026-10-19")
+    c = pd.Series(range(100, 100 + len(idx)), index=idx, dtype=float)
+    df = pd.DataFrame({"open": c, "high": c, "low": c, "close": c, "volume": 1.0,
+                       "foreign": 100.0, "institution": 50.0})
+    broker = PaperBroker(cash=1_000_000, prices={"A": df}, commission=0, sell_tax=0)
+    cfg = BotConfig(symbols=["A"], risk=RiskConfig(max_position_pct=0.5), commission=0)
+    rec = Recorder()
+    bot = TradingBot(broker, SmaFlowStrategy(), cfg, state_path=tmp_path / "s.json", notifier=rec)
+    bot.step(AM)
+    assert "A" in broker.positions
+    report = next(m for m in rec.messages if "오늘의 매매 완료" in m)
+    assert "외국인 +500주 · 기관 +250주" in report
+
+    # 수급 데이터가 없으면 신규 매수하지 않고 알림
+    broker2 = PaperBroker(cash=1_000_000, prices={"A": df.drop(columns=["foreign", "institution"])},
+                          commission=0, sell_tax=0)
+    rec2 = Recorder()
+    bot2 = TradingBot(broker2, SmaFlowStrategy(), cfg, state_path=tmp_path / "s2.json", notifier=rec2)
+    bot2.step(AM)
+    assert broker2.positions == {}
+    assert any("수급 조회 실패" in m for m in rec2.messages)

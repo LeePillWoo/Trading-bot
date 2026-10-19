@@ -3,16 +3,29 @@
 각 전략은 일봉 OHLCV DataFrame(columns: open, high, low, close, volume)을 받아
 날짜별 목표 포지션(1 = 보유, 0 = 미보유) Series를 반환한다.
 t일 값은 t일 종가까지의 정보만 사용해야 한다 (미래 참조 금지).
+
+needs_flow = True 인 전략은 투자자별 순매수 컬럼(foreign, institution)도 필요하다
+(with_flow 로 붙인다).
 """
 from __future__ import annotations
 
 import pandas as pd
 
 
+FLOW_COLUMNS = ["foreign", "institution", "individual", "program"]
+
+
+def with_flow(df: pd.DataFrame, flow: pd.DataFrame) -> pd.DataFrame:
+    """일봉에 투자자별 순매수(주 단위)를 날짜 기준으로 붙인다. 없는 날은 NaN."""
+    cols = [c for c in FLOW_COLUMNS if c in flow.columns]
+    return df.drop(columns=[c for c in cols if c in df.columns]).join(flow[cols], how="left")
+
+
 class Strategy:
     name = "base"
     # 신호 계산에 필요한 최소 봉 개수
     warmup = 1
+    needs_flow = False
 
     def signals(self, df: pd.DataFrame) -> pd.Series:
         raise NotImplementedError
@@ -88,7 +101,45 @@ class BreakoutStrategy(Strategy):
         return pd.Series(pos, index=df.index, dtype=int)
 
 
-STRATEGIES = {cls.name: cls for cls in (SmaCrossStrategy, RsiStrategy, BreakoutStrategy)}
+class SmaFlowStrategy(Strategy):
+    """이동평균 + 수급 필터 (추천).
+
+    매수: 단기 이평 > 장기 이평 (상승 추세) 이고, 최근 flow_days 일 외국인+기관 순매수 합계 > 0
+    매도: 단기 이평 < 장기 이평 (추세 이탈). 수급은 진입 조건으로만 쓴다.
+    """
+
+    name = "sma_flow"
+    needs_flow = True
+
+    def __init__(self, short: int = 5, long: int = 20, flow_days: int = 5):
+        if short >= long:
+            raise ValueError("short 기간은 long 기간보다 작아야 합니다")
+        self.short, self.long, self.flow_days = short, long, flow_days
+        self.warmup = max(long, flow_days)
+
+    def flow_sum(self, df: pd.DataFrame) -> pd.Series:
+        """최근 flow_days 일 외국인+기관 순매수 합계 (데이터가 빠진 날이 있으면 NaN)."""
+        if not {"foreign", "institution"} <= set(df.columns):
+            raise ValueError("sma_flow 전략은 투자자 수급 데이터가 필요합니다 (나무증권 API)")
+        return (df["foreign"] + df["institution"]).rolling(self.flow_days).sum()
+
+    def signals(self, df: pd.DataFrame) -> pd.Series:
+        close = df["close"]
+        fast, slow = close.rolling(self.short).mean(), close.rolling(self.long).mean()
+        flow = self.flow_sum(df)
+        pos, state = [], 0
+        for f, sl, fl in zip(fast, slow, flow):
+            if pd.isna(sl):
+                state = 0
+            elif state == 0 and f > sl and pd.notna(fl) and fl > 0:
+                state = 1
+            elif state == 1 and f < sl:
+                state = 0
+            pos.append(state)
+        return pd.Series(pos, index=df.index, dtype=int)
+
+
+STRATEGIES = {cls.name: cls for cls in (SmaFlowStrategy, SmaCrossStrategy, RsiStrategy, BreakoutStrategy)}
 
 
 def make_strategy(name: str, **params) -> Strategy:

@@ -30,6 +30,13 @@ class PaperBroker(Broker):
             raise KeyError(f"{symbol} 시세 데이터가 없습니다")
         return self.data_source.daily_ohlcv(symbol, days)
 
+    def investor_flow(self, symbol: str, days: int = 120) -> pd.DataFrame:
+        if symbol in self.prices and "foreign" in self.prices[symbol].columns:
+            return self.prices[symbol].tail(days)
+        if self.data_source is None:
+            raise KeyError(f"{symbol} 수급 데이터가 없습니다")
+        return self.data_source.investor_flow(symbol, days)
+
     def current_price(self, symbol: str) -> float:
         if symbol in self.prices:
             return float(self.prices[symbol]["close"].iloc[-1])

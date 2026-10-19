@@ -25,7 +25,7 @@ from .broker.base import Account, Broker
 from .config import BotConfig
 from .notify import Notifier
 from .risk import exit_reason, position_size
-from .strategy import Strategy
+from .strategy import Strategy, with_flow
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +77,15 @@ class BotState:
         }, ensure_ascii=False, indent=2))
 
 
+def flow_note(df: pd.DataFrame, days: int = 5) -> str:
+    """최근 days 일 외국인/기관 순매수 요약."""
+    recent = df.tail(days)
+    if recent.empty or "foreign" not in recent or recent["foreign"].isna().all():
+        return "수급 데이터 없음"
+    f, i = recent["foreign"].sum(), recent["institution"].sum()
+    return f"외국인 {f:+,.0f}주 · 기관 {i:+,.0f}주"
+
+
 def format_account(acc: Account, start_equity: float = 0.0) -> str:
     lines = [f"총자산 {acc.equity:,.0f}원 (현금 {acc.cash:,.0f}원)"]
     if start_equity:
@@ -102,6 +111,7 @@ class TradingBot:
         self.notifier = notifier or Notifier()
         self.label = label
         self._last_errors: dict[str, float] = {}
+        self.flow_notes: dict[str, str] = {}
 
     def notify(self, text: str) -> None:
         self.notifier.send(f"[{self.label}] {text}" if self.label else text)
@@ -167,6 +177,7 @@ class TradingBot:
     def signals_for_today(self, today: pd.Timestamp) -> tuple[dict[str, int], bool]:
         """(종목별 목표 포지션, 오늘 거래일 여부). 오늘 일봉이 하나라도 있으면 거래일."""
         targets, trading_day = {}, False
+        self.flow_notes = {}
         for sym in self.cfg.symbols:
             try:
                 df = self.broker.daily_ohlcv(sym, days=self.strategy.warmup + 60)
@@ -176,6 +187,15 @@ class TradingBot:
                 continue
             trading_day |= bool((df.index >= today).any())
             past = df[df.index < today]  # 장중 미완성 봉 제외
+            if getattr(self.strategy, "needs_flow", False):
+                try:
+                    flow = self.broker.investor_flow(sym, days=self.strategy.warmup + 60)
+                except Exception as e:
+                    log.exception("%s 수급 조회 실패", sym)
+                    self.notify_error(f"{sym} 수급 조회 실패 (오늘 신규 매수 안 함): {e}")
+                    flow = pd.DataFrame(columns=["foreign", "institution"], dtype=float)
+                past = with_flow(past, flow)
+                self.flow_notes[sym] = flow_note(past)
             if len(past) < self.strategy.warmup:
                 log.warning("%s: 데이터 부족 (%d봉)", sym, len(past))
                 targets[sym] = 0
@@ -231,7 +251,10 @@ class TradingBot:
                     cash = acc.cash
 
         signal_text = ", ".join(f"{s}:{'보유' if t else '미보유'}" for s, t in targets.items())
-        self.notify(f"☀️ 오늘의 매매 완료\n신호: {signal_text}\n\n주문 후 잔고\n"
+        flow_text = "".join(f"\n· {s} {n}" for s, n in self.flow_notes.items())
+        if flow_text:
+            flow_text = "\n\n수급 (최근 5일 순매수)" + flow_text
+        self.notify(f"☀️ 오늘의 매매 완료\n신호: {signal_text}{flow_text}\n\n주문 후 잔고\n"
                     f"{format_account(self.broker.account(), self.state.start_equity)}")
 
     def status_text(self) -> str:

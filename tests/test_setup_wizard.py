@@ -31,26 +31,27 @@ def run(tmp_path, answers, monkeypatch):
 
 
 def test_full_paper_setup(tmp_path, monkeypatch):
-    code, env = run(tmp_path, ["KEY", "SECRET", "", "TGTOKEN", "005930 035420"], monkeypatch)
+    code, env = run(tmp_path, ["KEY", "SECRET", "", "TGTOKEN", "005930 035420", ""], monkeypatch)
     assert code == 0
     assert env["NHPLUG_APP_KEY"] == "KEY" and env["NHPLUG_MODE"] == "paper"
     assert env["NHPLUG_ACCOUNT"] == "33333333303"  # 모의투자(03) 계좌 자동 선택
     assert env["TELEGRAM_CHAT_ID"] == "4242"
-    assert env["BOT_ARGS"].startswith("--symbols 005930 035420 --strategy")
+    assert env["BOT_ARGS"].startswith("--symbols 005930 035420 --strategy sma_flow")
     assert "--confirm-real" not in env["BOT_ARGS"]
     assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
 
 
 def test_rerun_keeps_values(tmp_path, monkeypatch):
-    run(tmp_path, ["KEY", "SECRET", "", "TGTOKEN", ""], monkeypatch)
-    code, env = run(tmp_path, ["", "", "", "", "", ""], monkeypatch)
+    run(tmp_path, ["KEY", "SECRET", "", "TGTOKEN", "", "2"], monkeypatch)
+    code, env = run(tmp_path, ["", "", "", "", "", "", ""], monkeypatch)
+    assert "--strategy sma " in env["BOT_ARGS"] + " "  # 기존 선택 유지
     assert code == 0 and env["NHPLUG_APP_KEY"] == "KEY" and env["TELEGRAM_CHAT_ID"] == "4242"
 
 
 def test_real_requires_confirmation(tmp_path, monkeypatch):
-    code, env = run(tmp_path, ["K", "S", "2", "아니", "", ""], monkeypatch)
+    code, env = run(tmp_path, ["K", "S", "2", "아니", "", "", ""], monkeypatch)
     assert env["NHPLUG_MODE"] == "paper"
-    code, env = run(tmp_path, ["", "", "2", "실전", "", "", ""], monkeypatch)
+    code, env = run(tmp_path, ["", "", "2", "실전", "", "", "", ""], monkeypatch)
     assert env["NHPLUG_MODE"] == "real" and env["NHPLUG_ACCOUNT"] == "11111111101"
     assert env["BOT_ARGS"].endswith("--confirm-real")
 

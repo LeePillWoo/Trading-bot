@@ -184,6 +184,25 @@ class NamuhBroker(Broker):
         df = df.drop_duplicates("date").set_index("date").sort_index()
         return df.tail(days)
 
+    def investor_flow(self, symbol: str, days: int = 120) -> pd.DataFrame:
+        """투자자별 일별 순매수량(주). 기관은 연기금·투신·보험 등을 합친 '기관계'."""
+        data = self._post(self.quote_url, "/krstock/quote/v1/currentInvestor", {
+            "market_cd": "KRX",
+            "iem_cd": symbol,
+            "array_cnt": str(min(int(days), 999)),
+        })
+        rows = [r for r in _rows(data.get("Output_0")) if str(r.get("bsop_date1", "")).strip()]
+        if not rows:
+            raise NamuhApiError(f"{symbol} 투자자 수급 데이터가 없습니다: {_message(data)}")
+        df = pd.DataFrame({
+            "date": [_date(r["bsop_date1"]) for r in rows],
+            "foreign": [_num(r.get("frgn_ntby_qty")) for r in rows],
+            "institution": [_num(r.get("gigwan")) for r in rows],
+            "individual": [_num(r.get("person")) for r in rows],
+            "program": [_num(r.get("program")) for r in rows],
+        })
+        return df.drop_duplicates("date").set_index("date").sort_index().tail(days)
+
     def current_price(self, symbol: str) -> float:
         data = self._post(self.quote_url, "/krstock/quote/v1/currentPrice",
                           {"market_cd": "KRX", "iem_cd": symbol})

@@ -13,7 +13,7 @@ import requests
 
 from .notify import TelegramNotifier
 
-DEFAULT_BOT_ARGS = "--symbols 005930 000660 --strategy sma --max-position 0.2 --stop-loss 0.07 --max-daily-loss 0.03"
+DEFAULT_BOT_ARGS = "--symbols 005930 000660 --strategy sma_flow --max-position 0.2 --stop-loss 0.07 --max-daily-loss 0.03"
 ACCOUNT_TYPES = {"01": "실전(일반)", "02": "실전(주문대리인)", "03": "모의투자"}
 
 
@@ -159,6 +159,14 @@ class Wizard:
             j += 1
         symbols = self.ask("  매매할 종목코드 (띄어쓰기로 구분)", default=" ".join(parts[i + 1:j]))
         parts[i + 1:j] = symbols.split()
+        current = parts[parts.index("--strategy") + 1] if "--strategy" in parts[:-1] else "sma_flow"
+        pick = self.ask("  전략: 1=이동평균+수급(추천), 2=이동평균만",
+                        default="2" if current == "sma" else "1")
+        strategy = {"1": "sma_flow", "2": "sma"}.get(pick, current)
+        if "--strategy" in parts[:-1]:
+            parts[parts.index("--strategy") + 1] = strategy
+        else:
+            parts += ["--strategy", strategy]
         if mode == "real":
             parts.append("--confirm-real")
         self.set({"BOT_ARGS": " ".join(parts)})
