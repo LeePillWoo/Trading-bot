@@ -1,0 +1,15 @@
+[Unit]
+Description=Stock auto-trading bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=__USER__
+WorkingDirectory=__DIR__
+EnvironmentFile=__DIR__/.env
+ExecStart=__DIR__/.venv/bin/python -m trading_bot run --broker api $BOT_ARGS
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

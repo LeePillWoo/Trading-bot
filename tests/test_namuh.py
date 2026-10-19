@@ -24,6 +24,7 @@ class FakeServer:
         self.expire_token_once = False
         self.buyable = 1000
         self.sellable = 1000
+        self.today_bar = []
         self.order_resp = {"rsp_cd": "00000", "rsp_msg": "주문이 완료되었습니다.",
                            "Output_0": {"mkt_orr_no": "0000012345"}}
 
@@ -38,7 +39,7 @@ class FakeServer:
             self.expire_token_once = False
             return Resp({"error_code": "IGW40043", "error_description": "유효하지 않은 token"}, 401)
         if url.endswith("/krstock/quote/v1/period"):
-            return Resp({"Output_0": {"iem_cd": body["iem_cd"]}, "Output_1": [
+            return Resp({"Output_0": {"iem_cd": body["iem_cd"]}, "Output_1": self.today_bar + [
                 {"bsop_date": "20261016", "stck_oprc": "100", "stck_hgpr": "110", "stck_lwpr": "90",
                  "stck_prpr": "105", "vol": "1,000"},
                 {"bsop_date": "20261015", "stck_oprc": "95", "stck_hgpr": "101", "stck_lwpr": "94",
@@ -204,6 +205,8 @@ def test_bot_trades_through_namuh(tmp_path):
             return pd.Series(1, index=df.index)
 
     b = make(tmp_path)
+    b.session.today_bar = [{"bsop_date": "20261019", "stck_oprc": "105", "stck_hgpr": "105",
+                            "stck_lwpr": "105", "stck_prpr": "105", "vol": "1"}]
     cfg = BotConfig(symbols=["000660"], risk=RiskConfig(max_position_pct=0.5))
     bot = TradingBot(b, Always(), cfg, state_path=tmp_path / "s.json")
     bot.step(datetime(2026, 10, 19, 9, 10, tzinfo=KST))

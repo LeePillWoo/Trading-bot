@@ -99,8 +99,10 @@ class RiskConfig:
     stop_loss_pct: float = 0.07
     # 익절 비율 (0 이면 사용 안 함)
     take_profit_pct: float = 0.0
-    # 하루 최대 주문 횟수 (폭주 방지)
+    # 하루 최대 주문 횟수 (폭주 방지, 도달하면 일시정지)
     max_orders_per_day: int = 20
+    # 하루 손실 한도 (장 시작 시 총자산 대비, 도달하면 일시정지. 0 이면 사용 안 함)
+    max_daily_loss_pct: float = 0.03
 
 
 @dataclass

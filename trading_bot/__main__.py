@@ -1,6 +1,7 @@
 """CLI.
 
 예시:
+  python -m trading_bot telegram-setup                             # 텔레그램 chat_id 확인
   python -m trading_bot accounts                                   # 나무증권 계좌 목록/구분 확인
   python -m trading_bot backtest --demo
   python -m trading_bot backtest --csv data/005930.csv --strategy rsi
@@ -14,13 +15,16 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
+import time
 from datetime import time as dtime
 from pathlib import Path
 
 from .backtest import run_backtest
 from .config import BotConfig, KisConfig, NamuhConfig, RiskConfig, load_dotenv
 from .data import load_csv, synthetic_ohlcv
+from .notify import Notifier, TelegramNotifier
 from .strategy import STRATEGIES, make_strategy
 
 APIS = ("namuh", "kis")
@@ -72,7 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--max-position", type=float, default=0.2, help="종목당 최대 비중")
         sp.add_argument("--stop-loss", type=float, default=0.07, help="손절 비율 (0이면 미사용)")
         sp.add_argument("--take-profit", type=float, default=0.0, help="익절 비율 (0이면 미사용)")
+        sp.add_argument("--max-daily-loss", type=float, default=0.03,
+                        help="하루 손실 한도, 도달하면 일시정지 (0이면 미사용)")
         sp.add_argument("--cash", type=float, default=10_000_000, help="초기 자금 (백테스트/가상매매)")
+
+    sub.add_parser("telegram-setup", help="텔레그램 봇 연결 확인 및 chat_id 찾기")
 
     acc = sub.add_parser("accounts", help="나무증권 계좌 목록과 사용 가능 환경 확인")
     acc.set_defaults(api="namuh")
@@ -111,6 +119,36 @@ def cmd_accounts() -> int:
     return 0
 
 
+def make_notifier() -> Notifier:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if token and chat_id:
+        return TelegramNotifier(token, chat_id)
+    logging.getLogger("trading_bot").warning(
+        "텔레그램 미설정 (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID) — 알림 없이 실행합니다")
+    return Notifier()
+
+
+def cmd_telegram_setup() -> int:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        raise ValueError("TELEGRAM_BOT_TOKEN 이 설정되지 않았습니다 (@BotFather 에서 발급)")
+    tg = TelegramNotifier(token, "")
+    print("텔레그램에서 내 봇에게 아무 메시지나 보내세요. (최대 2분 대기)")
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        for u in tg.get_updates(timeout=20):
+            chat = (u.get("message") or {}).get("chat") or {}
+            if chat.get("id"):
+                tg.chat_id = str(chat["id"])
+                print(f"\nchat_id 를 찾았습니다: {tg.chat_id}")
+                print(f".env 에 TELEGRAM_CHAT_ID={tg.chat_id} 를 넣으세요.")
+                tg.send("✅ 자동매매 봇 연결 확인 완료")
+                return 0
+    print("메시지를 받지 못했습니다. 봇 토큰과, 봇에게 메시지를 보냈는지 확인하세요.")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     load_dotenv()
@@ -119,10 +157,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "accounts":
         return cmd_accounts()
+    if args.command == "telegram-setup":
+        return cmd_telegram_setup()
 
     strategy = make_strategy(args.strategy, **parse_params(args.param))
     risk = RiskConfig(max_position_pct=args.max_position, stop_loss_pct=args.stop_loss,
-                      take_profit_pct=args.take_profit)
+                      take_profit_pct=args.take_profit, max_daily_loss_pct=args.max_daily_loss)
     cfg = BotConfig(symbols=args.symbols, strategy=args.strategy, risk=risk)
 
     if args.command == "backtest":
@@ -164,7 +204,9 @@ def main(argv: list[str] | None = None) -> int:
     cfg.interval_sec = args.interval
     hh, mm = map(int, args.trade_time.split(":"))
     state_path = f"bot_state_{args.broker}_{args.api}_{mode}.json"
-    bot = TradingBot(broker, strategy, cfg, state_path=state_path, trade_time=dtime(hh, mm))
+    label = {"paper": "모의투자", "real": "실전"}[mode] if args.broker == "api" else "가상매매"
+    bot = TradingBot(broker, strategy, cfg, state_path=state_path, trade_time=dtime(hh, mm),
+                     notifier=make_notifier(), label=label)
     if args.once:
         bot.step()
         acc = broker.account()
