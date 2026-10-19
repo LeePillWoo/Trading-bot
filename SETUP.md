@@ -8,33 +8,24 @@
         └──알림/명령──▶  [텔레그램]  ◀──  📱 휴대폰
 ```
 
-준비물 4가지: ① 나무증권 앱키/시크릿 ② 텔레그램 봇 토큰 ③ GitHub 토큰 ④ 클라우드 서버
+준비물 3가지: ① 나무증권 앱키/시크릿 ② 텔레그램 봇 토큰 ③ 클라우드 서버
 
-> ⚠️ 키·토큰은 남에게 보여주거나 채팅/메신저에 붙여넣지 마세요. 서버의 `.env` 파일에만 넣습니다.
+> ⚠️ 키·토큰은 남에게 보여주거나 채팅/메신저에 붙여넣지 마세요. 서버 설정 마법사에만 입력합니다.
 
 ---
 
 ## 1. 나무증권 앱키 발급
 
 [www.nhplug.com](https://www.nhplug.com) → **신청하기** → **namuh PLUG** (QR 로그인) → 앱키/시크릿을 메모장에 복사해 둡니다.
-모의투자 이용 신청(교육 이수 등)이 있으면 함께 진행하세요. 처음에는 반드시 **모의투자**로 돌립니다.
+모의투자 이용 신청이 있으면 함께 진행하세요. 처음에는 반드시 **모의투자**로 돌립니다.
 
 ## 2. 텔레그램 봇 만들기 (5분)
 
 1. 텔레그램 앱에서 **@BotFather** 검색 → 대화 시작
 2. `/newbot` 입력 → 봇 이름 입력 (예: 내 자동매매) → 아이디 입력 (`bot`으로 끝나야 함, 예: `myname_trade_bot`)
-3. 받은 **토큰**(`123456:ABC...` 형태)을 복사해 둡니다
-4. 방금 만든 봇을 검색해서 **시작(Start)** 을 눌러 둡니다
+3. 받은 **토큰**(`123456:ABC...` 형태)을 메모장에 복사해 둡니다
 
-## 3. GitHub 토큰 만들기 (저장소가 비공개라 필요)
-
-1. github.com 로그인 → 오른쪽 위 프로필 → **Settings** → 맨 아래 **Developer settings**
-2. **Personal access tokens → Fine-grained tokens → Generate new token**
-3. Repository access: **Only select repositories → Trading-bot**
-4. Permissions → Repository permissions → **Contents: Read-only**
-5. 생성된 토큰(`github_pat_...`)을 복사해 둡니다
-
-## 4. 클라우드 서버 만들기 (AWS Lightsail 서울)
+## 3. 클라우드 서버 만들기 (AWS Lightsail 서울)
 
 Lightsail은 **브라우저에서 바로 서버 터미널을 열 수 있어** 휴대폰으로 관리하기 편합니다.
 
@@ -43,65 +34,29 @@ Lightsail은 **브라우저에서 바로 서버 터미널을 열 수 있어** �
    - Region: **Seoul (ap-northeast-2)**
    - Platform: **Linux/Unix** → Blueprint: **OS Only → Ubuntu 24.04 LTS**
    - Plan: **공인 IPv4가 포함된** 가장 작은 요금제 (요금은 가입 화면에서 확인)
-3. **Create instance** → 1~2분 뒤 상태가 Running 이 되면, 인스턴스의 **터미널 아이콘(Connect using SSH)** 을 누릅니다
+3. **Create instance** → 1~2분 뒤 Running 이 되면 인스턴스의 **터미널 아이콘(Connect using SSH)** 을 누릅니다
 
-> Oracle Cloud(서울/춘천)의 무료 서버를 써도 됩니다. 아래 명령은 Ubuntu면 동일합니다.
+## 4. 한 줄 설치
 
-## 5. 서버에 봇 설치
-
-열린 터미널에 아래를 **한 줄씩** 붙여넣습니다.
+열린 터미널에 아래 한 줄을 붙여넣고 Enter:
 
 ```bash
-sudo apt-get update -y && sudo apt-get install -y git
-git clone -b ccr-b7de564b-nfauhm https://github.com/LeePillWoo/Trading-bot.git
-```
-- Username: `LeePillWoo`
-- Password: 3번에서 만든 **GitHub 토큰** (입력해도 화면에 안 보이는 게 정상)
-
-```bash
-cd Trading-bot
-bash deploy/install.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/LeePillWoo/Trading-bot/ccr-b7de564b-nfauhm/deploy/bootstrap.sh)
 ```
 
-## 6. 키 입력
+몇 분 설치가 진행된 뒤 **설정 마법사**가 하나씩 물어봅니다. 메모장에서 복사한 값을 붙여넣고 Enter만 누르면 됩니다.
 
-```bash
-nano .env
-```
-화살표로 이동해서 `=` 뒤에 값을 붙여넣습니다 (띄어쓰기·따옴표 없이).
+| 질문 | 입력 |
+|---|---|
+| 앱키 / 시크릿 | 1번에서 받은 값 |
+| 모드 | Enter (= 모의투자) |
+| 계좌 | **자동으로 찾아서 선택** |
+| 봇 토큰 | 2번에서 받은 값 → 안내가 나오면 **텔레그램에서 내 봇에게 아무 말이나 전송** (chat_id 자동 인식) |
+| 종목코드 | Enter (= 삼성전자, SK하이닉스) 또는 원하는 코드 |
 
-```
-NHPLUG_APP_KEY=앱키
-NHPLUG_APP_SECRET=시크릿
-NHPLUG_MODE=paper
-TELEGRAM_BOT_TOKEN=텔레그램_봇_토큰
-```
-저장: **Ctrl+O → Enter → Ctrl+X** (휴대폰 키보드에 Ctrl이 없으면 터미널 화면의 Ctrl 버튼 사용)
+텔레그램으로 **🤖 자동매매 봇 시작** 메시지가 오면 끝입니다. 터미널은 닫아도 됩니다 (서버가 재부팅돼도 자동으로 다시 켜집니다).
 
-## 7. 연결 확인
-
-```bash
-.venv/bin/python -m trading_bot telegram-setup
-```
-→ 텔레그램에서 내 봇에게 아무 말이나 보내면 `chat_id`가 나옵니다. `nano .env`로 `TELEGRAM_CHAT_ID=` 뒤에 넣으세요.
-텔레그램에 "✅ 연결 확인 완료"가 오면 성공입니다.
-
-```bash
-.venv/bin/python -m trading_bot accounts
-```
-→ **모의투자(03) ✅ 사용 가능** 으로 표시된 계좌번호를 `.env`의 `NHPLUG_ACCOUNT=` 뒤에 넣으세요.
-
-```bash
-.venv/bin/python -m trading_bot backtest --fetch --symbols 005930 000660
-```
-→ 실제 일봉으로 백테스트가 돌면 시세 연동도 정상입니다.
-
-## 8. 시작
-
-```bash
-sudo systemctl start trading-bot
-```
-텔레그램으로 **🤖 자동매매 봇 시작** 메시지가 오면 끝입니다. 이제 서버 창은 닫아도 됩니다 (서버가 재부팅돼도 자동으로 다시 켜집니다).
+> 설정을 바꾸거나 코드를 업데이트할 때도 **같은 한 줄을 다시 실행**하면 됩니다. 기존 값은 Enter 로 유지됩니다.
 
 ---
 
@@ -128,24 +83,17 @@ sudo systemctl start trading-bot
 
 > 09:05 보고나 15:35 보고가 **오지 않으면** 봇이나 서버가 멈춘 것입니다. Lightsail에서 터미널을 열고 `sudo systemctl status trading-bot` 으로 확인하세요.
 
-## 설정 바꾸기
-
-`nano .env` 에서 `BOT_ARGS` 줄을 고친 뒤 `sudo systemctl restart trading-bot`.
-
-```
-BOT_ARGS=--symbols 005930 000660 035420 --strategy sma --param short=10 long=60 --stop-loss 0.05
-```
-
 ## 실전 전환 (모의투자로 충분히 확인한 뒤에만)
 
-1. `.env`: `NHPLUG_MODE=real`, `NHPLUG_ACCOUNT=실전계좌(01)`, `BOT_ARGS` 끝에 ` --confirm-real` 추가
-2. `sudo systemctl restart trading-bot`
-3. 텔레그램 메시지 앞에 **[실전]** 이 붙는지 확인
+한 줄 설치 명령을 다시 실행 → 모드에서 **2** → **실전** 입력. 실전 계좌가 자동으로 선택됩니다.
+텔레그램 메시지 앞에 **[실전]** 이 붙는지 확인하세요.
 
-## 코드 업데이트
+## 고급 설정
 
-```bash
-cd ~/Trading-bot && bash deploy/update.sh
+전략·손절 비율 등은 서버에서 `nano ~/Trading-bot/.env` 의 `BOT_ARGS` 를 고친 뒤 `sudo systemctl restart trading-bot`.
+
+```
+BOT_ARGS=--symbols 005930 000660 035420 --strategy sma --param short=10 long=60 --stop-loss 0.05 --max-daily-loss 0.03
 ```
 
 ## 참고

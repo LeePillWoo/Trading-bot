@@ -1,6 +1,7 @@
 """CLI.
 
 예시:
+  python -m trading_bot setup                                      # 대화형 설정 (키 입력, 계좌/텔레그램 자동 확인)
   python -m trading_bot telegram-setup                             # 텔레그램 chat_id 확인
   python -m trading_bot accounts                                   # 나무증권 계좌 목록/구분 확인
   python -m trading_bot backtest --demo
@@ -80,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="하루 손실 한도, 도달하면 일시정지 (0이면 미사용)")
         sp.add_argument("--cash", type=float, default=10_000_000, help="초기 자금 (백테스트/가상매매)")
 
+    sub.add_parser("setup", help="대화형 설정 마법사 (.env 생성)")
     sub.add_parser("telegram-setup", help="텔레그램 봇 연결 확인 및 chat_id 찾기")
 
     acc = sub.add_parser("accounts", help="나무증권 계좌 목록과 사용 가능 환경 확인")
@@ -130,23 +132,20 @@ def make_notifier() -> Notifier:
 
 
 def cmd_telegram_setup() -> int:
+    from .setup_wizard import find_chat_id
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN 이 설정되지 않았습니다 (@BotFather 에서 발급)")
     tg = TelegramNotifier(token, "")
     print("텔레그램에서 내 봇에게 아무 메시지나 보내세요. (최대 2분 대기)")
-    deadline = time.monotonic() + 120
-    while time.monotonic() < deadline:
-        for u in tg.get_updates(timeout=20):
-            chat = (u.get("message") or {}).get("chat") or {}
-            if chat.get("id"):
-                tg.chat_id = str(chat["id"])
-                print(f"\nchat_id 를 찾았습니다: {tg.chat_id}")
-                print(f".env 에 TELEGRAM_CHAT_ID={tg.chat_id} 를 넣으세요.")
-                tg.send("✅ 자동매매 봇 연결 확인 완료")
-                return 0
-    print("메시지를 받지 못했습니다. 봇 토큰과, 봇에게 메시지를 보냈는지 확인하세요.")
-    return 1
+    chat_id = find_chat_id(tg)
+    if not chat_id:
+        print("메시지를 받지 못했습니다. 봇 토큰과, 봇에게 메시지를 보냈는지 확인하세요.")
+        return 1
+    tg.chat_id = chat_id
+    print(f"\nchat_id 를 찾았습니다: {chat_id}\n.env 에 TELEGRAM_CHAT_ID={chat_id} 를 넣으세요.")
+    tg.send("✅ 자동매매 봇 연결 확인 완료")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -157,6 +156,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "accounts":
         return cmd_accounts()
+    if args.command == "setup":
+        from .setup_wizard import Wizard
+        return Wizard().run()
     if args.command == "telegram-setup":
         return cmd_telegram_setup()
 
