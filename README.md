@@ -1,7 +1,7 @@
 # Trading-bot
 
-한국투자증권(KIS) Open API 기반 국내주식 자동매매 봇입니다.
-전략 백테스트 → 로컬 가상매매 → KIS 모의투자 → 실전 순서로 단계적으로 검증할 수 있도록 구성되어 있습니다.
+**나무증권(NH투자증권) Open API(NHPLUG)** 기반 국내주식 자동매매 봇입니다. 한국투자증권(KIS) API도 `--api kis`로 쓸 수 있습니다.
+전략 백테스트 → 로컬 가상매매 → 모의투자 → 실전 순서로 단계적으로 검증할 수 있도록 구성되어 있습니다.
 
 > ⚠️ 투자 손실에 대한 책임은 사용자에게 있습니다. 반드시 백테스트와 모의투자로 충분히 검증한 뒤 소액으로 시작하세요.
 
@@ -18,6 +18,7 @@ trading_bot/
 └── broker/
     ├── base.py     # 브로커 인터페이스
     ├── paper.py    # 로컬 가상매매 브로커
+    ├── namuh.py    # 나무증권(NH투자증권) NHPLUG REST API (기본)
     └── kis.py      # 한국투자증권 REST API
 ```
 
@@ -28,7 +29,26 @@ pip install -r requirements.txt
 cp .env.example .env   # 앱키/시크릿/계좌번호 입력
 ```
 
-KIS 앱키는 [KIS Developers](https://apiportal.koreainvestment.com)에서 발급받습니다. 모의투자 계좌와 실전 계좌의 앱키는 서로 다르므로, `KIS_MODE` 값에 맞는 키를 넣어야 합니다.
+### 나무증권 설정
+
+1. [nhplug.com](https://www.nhplug.com)에서 Open API를 신청하고 앱키/시크릿을 발급받아 `.env`의 `NHPLUG_APP_KEY`, `NHPLUG_APP_SECRET`에 넣습니다.
+2. 계좌번호 확인:
+   ```bash
+   python -m trading_bot accounts
+   ```
+   `acct_type` 03 = 모의투자 계좌, 01·02 = 실전 계좌입니다. 모드(`NHPLUG_MODE`)에 맞는 계좌를 `NHPLUG_ACCOUNT`에 넣습니다.
+3. `NHPLUG_MODE=paper`(모의투자, 기본)로 먼저 검증하고, 충분히 확인한 뒤에만 `real`로 바꿉니다.
+
+참고 사항 (공식 명세 기준):
+- 접근토큰은 실전 서버에서만 발급되며 24시간 유효합니다. **재발급할 때마다 보안 알림이 오므로** `.nhplug_token.json`에 캐시해 재사용합니다.
+- 시세 API(일봉, 현재가)는 모의투자 서버에서 제공되지 않아, 모의투자 모드에서도 **시세는 실전 서버에서 조회**하고 주문·잔고만 모의투자 서버로 보냅니다.
+- 주문 전에 매수/매도 가능수량을 조회해 그 이하로만 주문합니다 (미수 방지).
+- 호출 한도(초당 약 5회)에 맞춰 초당 4회로 제한합니다.
+- N2 고객은 `NHPLUG_DOMAIN=n2plug.com`.
+
+### 한국투자증권 (선택)
+
+[KIS Developers](https://apiportal.koreainvestment.com)에서 앱키를 발급받아 `KIS_*` 값을 넣고, 명령에 `--api kis`를 붙입니다.
 
 ## 1. 백테스트
 
@@ -39,8 +59,8 @@ python -m trading_bot backtest --demo --symbols 005930 000660
 # CSV (date,open,high,low,close,volume 또는 날짜,시가,고가,저가,종가,거래량 / 파일명 = 종목코드)
 python -m trading_bot backtest --csv data/005930.csv --strategy rsi
 
-# KIS API로 일봉 조회
-python -m trading_bot backtest --kis --symbols 005930 000660 --days 500 \
+# 나무증권 API로 일봉 조회 (--api kis 로 한국투자증권)
+python -m trading_bot backtest --fetch --symbols 005930 000660 --days 500 \
     --strategy sma --param short=10 long=60 --stop-loss 0.05
 ```
 
@@ -49,17 +69,17 @@ python -m trading_bot backtest --kis --symbols 005930 000660 --days 500 \
 ## 2. 자동매매 실행
 
 ```bash
-# 로컬 가상매매: KIS 시세로 신호를 계산하지만 주문은 메모리에서만 시뮬레이션
+# 로컬 가상매매: 실시세로 신호를 계산하지만 주문은 메모리에서만 시뮬레이션
 python -m trading_bot run --symbols 005930 000660
 
-# KIS 모의투자 계좌로 주문 (KIS_MODE=paper)
-python -m trading_bot run --broker kis --symbols 005930 000660
+# 나무증권 모의투자 계좌로 주문 (NHPLUG_MODE=paper)
+python -m trading_bot run --broker api --symbols 005930 000660
 
-# 실전 주문 (KIS_MODE=real + --confirm-real 필수)
-python -m trading_bot run --broker kis --symbols 005930 --confirm-real
+# 실전 주문 (NHPLUG_MODE=real + --confirm-real 필수)
+python -m trading_bot run --broker api --symbols 005930 --confirm-real
 
 # cron 등으로 한 번만 실행
-python -m trading_bot run --broker kis --once
+python -m trading_bot run --broker api --once
 ```
 
 ### 매매 규칙
@@ -97,4 +117,6 @@ python -m pytest
 
 - 공휴일 달력은 없음 (휴장일에는 주문이 거부되고 로그에 남음)
 - 시장가 주문 체결 여부는 별도로 조회하지 않음 (다음 점검 때 잔고로 반영)
-- 국내주식 현금 계좌만 지원 (해외주식, 신용, 분할매수 미지원)
+- 국내주식 현금 계좌, KRX 정규장만 지원 (해외주식, 신용, NXT/시간외, 분할매수 미지원)
+- 나무증권 잔고는 연속조회를 하지 않음 (보유 종목이 한 페이지를 넘는 경우 일부 누락 가능)
+- 나무증권 연동은 공식 명세(openapi.json, 260911)와 SDK 기준으로 작성했고, 실제 서버 연동은 사용자 앱키로 확인이 필요

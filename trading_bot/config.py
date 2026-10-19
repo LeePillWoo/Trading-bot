@@ -56,6 +56,42 @@ class KisConfig:
 
 
 @dataclass
+class NamuhConfig:
+    """나무증권(NH투자증권) Open API 설정."""
+
+    app_key: str
+    app_secret: str
+    account_no: str  # /n2/acctinfo 의 acct_no (운영 01·02, 모의투자 03 계좌)
+    mode: str = "paper"  # paper(모의투자 moapi) | real(운영 api)
+    domain: str = "nhplug.com"  # 나무 = nhplug.com, N2 = n2plug.com
+
+    @property
+    def is_real(self) -> bool:
+        return self.mode == "real"
+
+    @classmethod
+    def from_env(cls) -> "NamuhConfig":
+        mode = os.environ.get("NHPLUG_MODE", "paper").lower()
+        if mode not in ("paper", "real"):
+            raise ValueError(f"NHPLUG_MODE는 paper 또는 real 이어야 합니다: {mode}")
+        domain = os.environ.get("NHPLUG_DOMAIN", "nhplug.com").lower()
+        if domain not in ("nhplug.com", "n2plug.com"):
+            raise ValueError(f"NHPLUG_DOMAIN은 nhplug.com 또는 n2plug.com 이어야 합니다: {domain}")
+        cfg = cls(
+            app_key=os.environ.get("NHPLUG_APP_KEY", ""),
+            app_secret=os.environ.get("NHPLUG_APP_SECRET", ""),
+            account_no=os.environ.get("NHPLUG_ACCOUNT", "").replace("-", ""),
+            mode=mode,
+            domain=domain,
+        )
+        missing = [n for n, v in (("NHPLUG_APP_KEY", cfg.app_key), ("NHPLUG_APP_SECRET", cfg.app_secret))
+                   if not v]
+        if missing:
+            raise ValueError(f"환경변수가 설정되지 않았습니다: {', '.join(missing)}")
+        return cfg
+
+
+@dataclass
 class RiskConfig:
     # 종목당 최대 투자 비중 (총 자산 대비)
     max_position_pct: float = 0.2
