@@ -1,0 +1,150 @@
+"""CLI.
+
+예시:
+  python -m trading_bot backtest --demo
+  python -m trading_bot backtest --csv data/005930.csv --strategy rsi
+  python -m trading_bot backtest --kis --symbols 005930 000660 --days 500
+  python -m trading_bot run --symbols 005930 000660               # 로컬 가상매매 (KIS 시세 사용)
+  python -m trading_bot run --broker kis --symbols 005930         # KIS 모의투자/실전 주문
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+from datetime import time as dtime
+from pathlib import Path
+
+from .backtest import run_backtest
+from .config import BotConfig, KisConfig, RiskConfig, load_dotenv
+from .data import load_csv, synthetic_ohlcv
+from .strategy import STRATEGIES, make_strategy
+
+
+def setup_logging(log_dir: str = "logs") -> None:
+    Path(log_dir).mkdir(exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout),
+                  logging.FileHandler(Path(log_dir) / "trading.log", encoding="utf-8")],
+    )
+
+
+def parse_params(pairs: list[str]) -> dict:
+    params = {}
+    for pair in pairs or []:
+        key, value = pair.split("=", 1)
+        params[key] = float(value) if "." in value else int(value)
+    return params
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="trading_bot", description="주식 자동매매 봇")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    def common(sp):
+        sp.add_argument("--strategy", default="sma", choices=sorted(STRATEGIES))
+        sp.add_argument("--param", nargs="*", default=[], metavar="KEY=VALUE",
+                        help="전략 파라미터 (예: short=5 long=20)")
+        sp.add_argument("--symbols", nargs="+", default=["005930"])
+        sp.add_argument("--max-position", type=float, default=0.2, help="종목당 최대 비중")
+        sp.add_argument("--stop-loss", type=float, default=0.07, help="손절 비율 (0이면 미사용)")
+        sp.add_argument("--take-profit", type=float, default=0.0, help="익절 비율 (0이면 미사용)")
+        sp.add_argument("--cash", type=float, default=10_000_000, help="초기 자금 (백테스트/가상매매)")
+
+    bt = sub.add_parser("backtest", help="과거 데이터로 전략 검증")
+    common(bt)
+    src = bt.add_mutually_exclusive_group(required=True)
+    src.add_argument("--csv", nargs="+", help="종목별 CSV 파일 (파일명=종목코드)")
+    src.add_argument("--kis", action="store_true", help="KIS API로 일봉 조회")
+    src.add_argument("--demo", action="store_true", help="랜덤 데이터로 데모 실행")
+    bt.add_argument("--days", type=int, default=500)
+
+    run = sub.add_parser("run", help="자동매매 실행")
+    common(run)
+    run.add_argument("--broker", choices=["paper", "kis"], default="paper",
+                     help="paper: 로컬 가상매매(KIS 시세), kis: KIS 계좌로 실제 주문")
+    run.add_argument("--interval", type=int, default=300, help="장중 점검 주기(초)")
+    run.add_argument("--trade-time", default="09:05", help="일일 리밸런싱 시각 (HH:MM, KST)")
+    run.add_argument("--once", action="store_true", help="한 번만 실행 (cron 용)")
+    run.add_argument("--confirm-real", action="store_true",
+                     help="KIS_MODE=real 일 때 실전 주문을 허용하려면 반드시 지정")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    load_dotenv()
+    setup_logging()
+    log = logging.getLogger("trading_bot")
+
+    strategy = make_strategy(args.strategy, **parse_params(args.param))
+    risk = RiskConfig(max_position_pct=args.max_position, stop_loss_pct=args.stop_loss,
+                      take_profit_pct=args.take_profit)
+    cfg = BotConfig(symbols=args.symbols, strategy=args.strategy, risk=risk)
+
+    if args.command == "backtest":
+        if args.csv:
+            data = {Path(f).stem: load_csv(f) for f in args.csv}
+        elif args.kis:
+            from .broker.kis import KisBroker
+            kis = KisBroker(KisConfig.from_env())
+            data = {s: kis.daily_ohlcv(s, args.days) for s in args.symbols}
+        else:
+            data = {s: synthetic_ohlcv(args.days, seed=i) for i, s in enumerate(args.symbols)}
+        result = run_backtest(data, strategy, cash=args.cash, risk=risk,
+                              commission=cfg.commission, sell_tax=cfg.sell_tax)
+        stats = result.stats()
+        for k, v in stats.items():
+            if k == "샤프지수":
+                print(f"{k:>14}: {v:.2f}")
+            elif isinstance(v, float):
+                print(f"{k:>14}: {v:.2%}")
+            else:
+                print(f"{k:>14}: {v:,}" if isinstance(v, int) else f"{k:>14}: {v}")
+        return 0
+
+    # run
+    from .bot import TradingBot
+    from .broker.kis import KisBroker
+    from .broker.paper import PaperBroker
+
+    kis_cfg = KisConfig.from_env()
+    kis = KisBroker(kis_cfg)
+    if args.broker == "kis":
+        if kis_cfg.is_real and not args.confirm_real:
+            log.error("KIS_MODE=real 입니다. 실전 주문을 하려면 --confirm-real 옵션을 지정하세요.")
+            return 2
+        broker = kis
+        log.warning("KIS %s 계좌로 주문합니다", "실전" if kis_cfg.is_real else "모의투자")
+    else:
+        broker = PaperBroker(cash=args.cash, data_source=kis,
+                             commission=cfg.commission, sell_tax=cfg.sell_tax)
+        log.info("로컬 가상매매 모드 (실제 주문 없음, 상태는 프로세스 종료 시 초기화)")
+
+    cfg.interval_sec = args.interval
+    hh, mm = map(int, args.trade_time.split(":"))
+    state_path = f"bot_state_{args.broker}_{kis_cfg.mode}.json"
+    bot = TradingBot(broker, strategy, cfg, state_path=state_path, trade_time=dtime(hh, mm))
+    if args.once:
+        bot.step()
+        acc = broker.account()
+        log.info("계좌: 현금=%.0f 평가=%.0f 보유=%s", acc.cash, acc.equity,
+                 json.dumps({s: p.qty for s, p in acc.positions.items()}))
+    else:
+        bot.run_forever()
+    return 0
+
+
+def cli() -> int:
+    try:
+        return main()
+    except ValueError as e:
+        print(f"오류: {e}\n.env.example 을 참고해 .env 파일을 설정하세요.", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(cli())

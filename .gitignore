@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+.kis_token.json
+logs/
+.pytest_cache/
+bot_state_*.json
