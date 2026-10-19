@@ -124,3 +124,13 @@ def test_telegram_only_accepts_own_chat():
     assert tg._offset == 5
     tg.send("hi")
     assert tg.session.sent[-1] == {"chat_id": "111", "text": "hi"}
+
+
+def test_service_argv_reads_bot_args(monkeypatch):
+    from trading_bot.__main__ import build_parser, service_argv
+
+    monkeypatch.setenv("BOT_ARGS", "--symbols 005930 000660 --stop-loss 0.05")
+    argv = service_argv()
+    assert argv[:3] == ["run", "--broker", "api"]
+    args = build_parser().parse_args(argv)
+    assert args.symbols == ["005930", "000660"] and args.stop_loss == 0.05

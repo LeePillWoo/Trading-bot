@@ -1,6 +1,7 @@
 """CLI.
 
 예시:
+  python -m trading_bot service                                    # .env 의 BOT_ARGS 로 실행 (Termux/서버)
   python -m trading_bot setup                                      # 대화형 설정 (키 입력, 계좌/텔레그램 자동 확인)
   python -m trading_bot telegram-setup                             # 텔레그램 chat_id 확인
   python -m trading_bot accounts                                   # 나무증권 계좌 목록/구분 확인
@@ -17,6 +18,7 @@ import argparse
 import json
 import logging
 import os
+import shlex
 import sys
 import time
 from datetime import time as dtime
@@ -148,7 +150,16 @@ def cmd_telegram_setup() -> int:
     return 0
 
 
+def service_argv() -> list[str]:
+    """`service` = .env 의 BOT_ARGS 로 증권사 계좌 자동매매 실행 (Termux/서버 공용)."""
+    load_dotenv()
+    return ["run", "--broker", "api", *shlex.split(os.environ.get("BOT_ARGS", ""))]
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["service"]:
+        argv = service_argv()
     args = build_parser().parse_args(argv)
     load_dotenv()
     setup_logging()
