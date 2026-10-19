@@ -10,6 +10,8 @@ import time
 
 import requests
 
+from .redact import redact
+
 log = logging.getLogger(__name__)
 
 
@@ -37,12 +39,14 @@ class TelegramNotifier(Notifier):
         self._offset: int | None = None
 
     def send(self, text: str) -> None:
+        text = redact(text)
         log.info("[알림] %s", text)
         try:
             self.session.post(f"{self.base}/sendMessage",
                               json={"chat_id": self.chat_id, "text": text[:4000]}, timeout=10)
         except requests.RequestException as e:
-            log.warning("텔레그램 전송 실패: %s", e)
+            # 예외 문자열에는 봇 토큰이 든 URL 이 들어가므로 종류만 남긴다
+            log.warning("텔레그램 전송 실패 (%s)", type(e).__name__)
 
     def get_updates(self, timeout: float = 0) -> list[dict]:
         params = {"timeout": int(timeout)}
@@ -52,7 +56,7 @@ class TelegramNotifier(Notifier):
             resp = self.session.get(f"{self.base}/getUpdates", params=params, timeout=timeout + 10)
             updates = resp.json().get("result", [])
         except (requests.RequestException, ValueError) as e:
-            log.warning("텔레그램 수신 실패: %s", e)
+            log.warning("텔레그램 수신 실패 (%s)", type(e).__name__)
             time.sleep(min(timeout, 5))
             return []
         if updates:

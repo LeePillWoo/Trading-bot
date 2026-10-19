@@ -31,7 +31,7 @@ def run(tmp_path, answers, monkeypatch):
 
 
 def test_full_paper_setup(tmp_path, monkeypatch):
-    code, env = run(tmp_path, ["KEY", "SECRET", "", "TGTOKEN", "005930 035420", ""], monkeypatch)
+    code, env = run(tmp_path, ["KEY", "SECRET", "", "TGTOKEN", "", "005930 035420", ""], monkeypatch)
     assert code == 0
     assert env["NHPLUG_APP_KEY"] == "KEY" and env["NHPLUG_MODE"] == "paper"
     assert env["NHPLUG_ACCOUNT"] == "33333333303"  # 모의투자(03) 계좌 자동 선택
@@ -42,7 +42,7 @@ def test_full_paper_setup(tmp_path, monkeypatch):
 
 
 def test_rerun_keeps_values(tmp_path, monkeypatch):
-    run(tmp_path, ["KEY", "SECRET", "", "TGTOKEN", "", "3"], monkeypatch)
+    run(tmp_path, ["KEY", "SECRET", "", "TGTOKEN", "", "", "3"], monkeypatch)
     code, env = run(tmp_path, ["", "", "", "", "", "", ""], monkeypatch)
     assert "--strategy sma " in env["BOT_ARGS"] + " "  # 기존 선택 유지
     assert code == 0 and env["NHPLUG_APP_KEY"] == "KEY" and env["TELEGRAM_CHAT_ID"] == "4242"
@@ -76,3 +76,8 @@ def test_network_error_message(tmp_path, monkeypatch, capsys):
     w = Wizard(tmp_path / ".env", ask=lambda _: next(it), broker_factory=Down)
     assert w.run() == 1
     assert "네트워크" in capsys.readouterr().out
+
+
+def test_wrong_telegram_account_rejected(tmp_path, monkeypatch):
+    code, env = run(tmp_path, ["KEY", "SECRET", "", "TGTOKEN", "n"], monkeypatch)
+    assert code == 1 and "TELEGRAM_CHAT_ID" not in env

@@ -12,6 +12,7 @@ from typing import Callable
 import requests
 
 from .notify import TelegramNotifier
+from .redact import redact
 
 DEFAULT_BOT_ARGS = "--symbols 005930 000660 --strategy breakout --max-position 0.2 --stop-loss 0.07 --max-daily-loss 0.03"
 ACCOUNT_TYPES = {"01": "실전(일반)", "02": "실전(주문대리인)", "03": "모의투자"}
@@ -44,13 +45,17 @@ def save_env(path: Path, updates: dict[str, str]) -> None:
         pass
 
 
-def find_chat_id(tg: TelegramNotifier, wait: float = 120) -> str | None:
+def find_chat_id(tg: TelegramNotifier, wait: float = 120) -> tuple[str, str] | None:
+    """봇에게 처음 온 메시지의 (chat_id, 보낸 사람 표시 이름)."""
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
         for u in tg.get_updates(timeout=min(20, max(1, deadline - time.monotonic()))):
             chat = (u.get("message") or {}).get("chat") or {}
             if chat.get("id"):
-                return str(chat["id"])
+                name = " ".join(filter(None, [chat.get("first_name"), chat.get("last_name")]))
+                if chat.get("username"):
+                    name += f" (@{chat['username']})"
+                return str(chat["id"]), name.strip() or "이름 없음"
     return None
 
 
@@ -103,12 +108,13 @@ class Wizard:
         try:
             broker = self._broker()
             accounts = broker.list_accounts()
-        except requests.RequestException as e:
-            print(f"  ❌ 나무증권 서버에 접속하지 못했습니다 (네트워크): {e}\n"
-                  "  서버 인터넷 연결을 확인하고 잠시 후 다시 실행하세요.")
-            return 1
         except Exception as e:
-            print(f"  ❌ 나무증권 연결 실패: {e}\n  앱키/시크릿을 확인하고 다시 실행하세요.")
+            msg = redact(str(e))
+            if isinstance(e, requests.RequestException) or "네트워크" in msg:
+                print(f"  ❌ 나무증권 서버에 접속하지 못했습니다 (네트워크): {msg}\n"
+                      "  인터넷 연결을 확인하고 잠시 후 다시 실행하세요.")
+            else:
+                print(f"  ❌ 나무증권 연결 실패: {msg}\n  앱키/시크릿을 확인하고 다시 실행하세요.")
             return 1
         want = ("01", "02") if mode == "real" else ("03",)
         usable = [a for a in accounts if str(a.get("acct_type", "")).strip() in want]
@@ -136,9 +142,14 @@ class Wizard:
             tg = self.telegram_factory(token, self.env.get("TELEGRAM_CHAT_ID", ""))
             if not self.env.get("TELEGRAM_CHAT_ID") or self.ask("  chat_id 를 다시 찾을까요? y/N", default="n").lower() == "y":
                 print("  👉 지금 텔레그램에서 내 봇에게 아무 메시지나 보내세요. (2분 대기)")
-                chat_id = find_chat_id(tg)
-                if not chat_id:
+                found = find_chat_id(tg)
+                if not found:
                     print("  ❌ 메시지를 받지 못했습니다. 토큰을 확인하고 다시 실행하세요.")
+                    return 1
+                chat_id, name = found
+                # 다른 사람이 먼저 메시지를 보냈다면 그 사람이 봇을 조종하게 되므로 확인
+                if self.ask(f"  메시지 보낸 계정: {name} — 본인이 맞나요? Y/n", default="y").lower() == "n":
+                    print("  ❌ 등록하지 않았습니다. 다시 실행해서 본인 계정으로 메시지를 보내세요.")
                     return 1
                 tg.chat_id = chat_id
                 self.set({"TELEGRAM_CHAT_ID": chat_id})

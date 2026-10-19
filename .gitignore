@@ -3,6 +3,7 @@ __pycache__/
 .env
 .kis_token.json
 logs/
+.venv/
 .pytest_cache/
 bot_state_*.json
 .nhplug_token.json

@@ -34,13 +34,19 @@ APIS = ("namuh", "kis")
 
 
 def setup_logging(log_dir: str = "logs") -> None:
+    from logging.handlers import RotatingFileHandler
+
+    from .redact import RedactingFormatter
+
     Path(log_dir).mkdir(exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout),
-                  logging.FileHandler(Path(log_dir) / "trading.log", encoding="utf-8")],
-    )
+    # 로그 파일은 1MB 씩 최대 4개까지만 보관, 비밀값은 가려서 기록
+    handlers = [logging.StreamHandler(sys.stdout),
+                RotatingFileHandler(Path(log_dir) / "trading.log", maxBytes=1_000_000,
+                                    backupCount=3, encoding="utf-8")]
+    fmt = RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    for h in handlers:
+        h.setFormatter(fmt)
+    logging.basicConfig(level=logging.INFO, handlers=handlers)
 
 
 def parse_params(pairs: list[str]) -> dict:
@@ -142,12 +148,14 @@ def cmd_telegram_setup() -> int:
         raise ValueError("TELEGRAM_BOT_TOKEN 이 설정되지 않았습니다 (@BotFather 에서 발급)")
     tg = TelegramNotifier(token, "")
     print("텔레그램에서 내 봇에게 아무 메시지나 보내세요. (최대 2분 대기)")
-    chat_id = find_chat_id(tg)
-    if not chat_id:
+    found = find_chat_id(tg)
+    if not found:
         print("메시지를 받지 못했습니다. 봇 토큰과, 봇에게 메시지를 보냈는지 확인하세요.")
         return 1
+    chat_id, name = found
     tg.chat_id = chat_id
-    print(f"\nchat_id 를 찾았습니다: {chat_id}\n.env 에 TELEGRAM_CHAT_ID={chat_id} 를 넣으세요.")
+    print(f"\n보낸 계정: {name} (본인이 아니면 등록하지 마세요)")
+    print(f"chat_id 를 찾았습니다: {chat_id}\n.env 에 TELEGRAM_CHAT_ID={chat_id} 를 넣으세요.")
     tg.send("✅ 자동매매 봇 연결 확인 완료")
     return 0
 

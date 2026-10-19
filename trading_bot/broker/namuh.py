@@ -107,12 +107,16 @@ class NamuhBroker(Broker):
                     return self._token
             except (OSError, ValueError, KeyError):
                 pass
-        resp = self.session.post(f"{self.auth_url}/oauth2/token", params={
-            "appkey": self.cfg.app_key,
-            "appsecretkey": self.cfg.app_secret,
-            "grant_type": "client_credentials",
-            "scope": "oob",
-        }, headers={"content-type": "application/x-www-form-urlencoded"}, timeout=10)
+        try:
+            resp = self.session.post(f"{self.auth_url}/oauth2/token", params={
+                "appkey": self.cfg.app_key,
+                "appsecretkey": self.cfg.app_secret,
+                "grant_type": "client_credentials",
+                "scope": "oob",
+            }, headers={"content-type": "application/x-www-form-urlencoded"}, timeout=10)
+        except requests.RequestException as e:
+            # 오류 문자열에 앱키/시크릿이 담긴 URL 이 들어가므로 원본 예외를 버린다
+            raise NamuhApiError(f"토큰 발급 요청 실패 (네트워크: {type(e).__name__})") from None
         try:
             data = resp.json()
         except ValueError:

@@ -7,6 +7,10 @@ if pgrep -f "trading_bot service" >/dev/null; then
 fi
 termux-wake-lock 2>/dev/null || true
 mkdir -p logs
+# service.log 가 1MB 를 넘으면 한 번 돌려 둔다 (무한히 커지지 않게)
+if [ -f logs/service.log ] && [ "$(wc -c < logs/service.log)" -gt 1000000 ]; then
+  mv -f logs/service.log logs/service.log.1
+fi
 nohup bash -c 'while true; do python -m trading_bot service; echo "재시작 대기 30초"; sleep 30; done' \
   >> logs/service.log 2>&1 &
 sleep 3
