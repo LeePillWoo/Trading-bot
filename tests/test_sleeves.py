@@ -144,3 +144,25 @@ def test_fresh_account_never_touches_existing_holdings(tmp_path):
         bot = TradingBot(broker, Fixed(0), cfg, state_path=path, notifier=Recorder())
         bot.step(AM)
         assert broker.positions["A"].qty == 100
+
+
+def test_month_not_marked_when_buy_fails_and_rebalance_command(tmp_path):
+    from trading_bot.strategy import DualMomentumStrategy
+    idx = pd.bdate_range("2026-08-01", "2026-10-19")
+    c = pd.Series(range(100, 100 + len(idx)), index=idx, dtype=float)
+    df = pd.DataFrame({"open": c, "high": c, "low": c, "close": c, "volume": 1.0})
+    broker = PaperBroker(cash=10, prices={"A": df, "X": prices()}, commission=0, sell_tax=0)
+    broker.cash = 10
+    broker.positions = {}
+    from trading_bot.broker.base import Position
+    broker.positions["X"] = Position("X", 1000, 100.0, 100.0)  # 원래 들고 있던 종목 (총자산 > 0)
+    cfg = BotConfig(symbols=["A"], risk=RiskConfig(max_daily_loss_pct=0), commission=0)
+    rec = Recorder()
+    bot = TradingBot(broker, [Sleeve(DualMomentumStrategy(lookback=10, top_n=1, rf=0), ["A"], 1.0, "장기")],
+                     cfg, state_path=tmp_path / "s.json", notifier=rec)
+    bot.step(AM)
+    assert bot.state.portfolio_month == {} and any("리밸런싱 미완료" in m for m in rec.messages)
+    broker.cash = 1_000_000  # 현금이 생김
+    bot.handle_command("/rebalance")
+    bot.step(AM)
+    assert "A" in bot.state.holdings["장기"] and bot.state.portfolio_month == {"장기": "2026-10"}

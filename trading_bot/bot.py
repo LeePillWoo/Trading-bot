@@ -42,7 +42,7 @@ ERROR_NOTIFY_INTERVAL = 1800  # 같은 오류는 30분에 한 번만 알림
 HEARTBEAT_SEC = 3600  # 1시간마다 로그에 작동 기록
 
 HELP = ("/status 현재 상태\n/report 계좌 보고서\n/stop 비상정지 (모든 주문 중단)\n"
-        "/start 매매 재개\n/help 명령 목록")
+        "/start 매매 재개\n/rebalance 오늘 매매 다시 실행 (장중)\n/help 명령 목록")
 
 
 def is_market_open(now: datetime) -> bool:
@@ -375,7 +375,8 @@ class TradingBot:
     def label_of(self, symbol: str) -> str:
         return f"{self.names[symbol]}({symbol})" if symbol in self.names else symbol
 
-    def _apply_targets(self, sleeve: Sleeve, targets: dict[str, int], weight: float, reason: str) -> None:
+    def _apply_targets(self, sleeve: Sleeve, targets: dict[str, int], weight: float, reason: str) -> list[str]:
+        """목표대로 매도/매수. 사야 했는데 못 산 종목 목록을 반환 (재진입 금지 종목 제외)."""
         for sym, target in targets.items():
             if target == 0 and sleeve.key(sym) in self.state.blocked:
                 log.info("%s: 신호 해제로 재진입 금지 해제", sym)
@@ -391,6 +392,8 @@ class TradingBot:
                 equity, cash = self.budget(sleeve, acc)
                 if self._buy(sleeve, sym, equity, cash, weight):
                     acc = self.broker.account()
+        return [s for s, t in targets.items()
+                if t == 1 and s not in self.ledger(sleeve) and sleeve.key(s) not in self.state.blocked]
 
     def rebalance_sleeve(self, sleeve: Sleeve, now: datetime) -> str | None:
         """슬리브 하나의 오늘 매매. 보고용 문구를 반환, 휴장일이면 None."""
@@ -408,7 +411,14 @@ class TradingBot:
                 return f"{sleeve.tag}데이터 조회 실패 — 다음에 재시도"
             for sym in self.ledger(sleeve):  # 후보에서 빠진 보유 종목은 정리
                 targets.setdefault(sym, 0)
-            self._apply_targets(sleeve, targets, strategy.weight, "리밸런싱 제외")
+            missed = self._apply_targets(sleeve, targets, strategy.weight, "리밸런싱 제외")
+            if missed:
+                # 현금 부족 등으로 못 산 종목이 있으면 완료로 기록하지 않고 다음 거래일에 다시 시도
+                return (f"📅 {sleeve.tag}{month} 리밸런싱 미완료 — 못 산 종목: "
+                        f"{', '.join(self.label_of(s) for s in missed)}\n"
+                        f"(현금 부족 등. 다음 거래일 09:05 또는 /rebalance 로 다시 시도)\n"
+                        + (f"{universe_note}\n" if universe_note else "")
+                        + f"최근 {strategy.lookback}거래일 수익률\n{note}")
             self.state.portfolio_month[sleeve.name] = month
             self.state.save()
             held = [s for s, t in targets.items() if t] or ["없음 (전부 현금)"]
@@ -492,6 +502,12 @@ class TradingBot:
                 self.pause("텔레그램 /stop 명령")
         elif cmd == "/start":
             self.resume()
+        elif cmd == "/rebalance":
+            # 이번 달 리밸런싱 기록을 지우고, 다음 점검(최대 5분 뒤) 때 오늘 매매를 다시 실행
+            self.state.rebalanced = False
+            self.state.portfolio_month = {}
+            self.state.save()
+            self.notify("🔁 다음 점검 때(최대 5분 안) 오늘 매매를 다시 실행합니다. 장중에만 동작합니다.")
         elif cmd in ("/status", "/report"):
             self.notify(self.status_text())
         else:
