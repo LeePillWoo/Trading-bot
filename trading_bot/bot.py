@@ -82,8 +82,13 @@ class BotState:
         # 듀얼 모멘텀: 슬리브별 마지막 리밸런싱 달 (YYYY-MM)
         months = data.get("portfolio_month", {})
         self.portfolio_month: dict[str, str] = months if isinstance(months, dict) else {"": months}
-        # 슬리브별 보유 장부: {슬리브: {종목: {"qty": 수량, "price": 매수가}}}. None 이면 아직 초기화 전
-        self.holdings: dict[str, dict[str, dict]] | None = data.get("holdings")
+        # 슬리브별 보유 장부: {슬리브: {종목: {"qty": 수량, "price": 매수가}}}
+        # None = 장부가 없던 이전 버전의 상태 파일 → init_ledger 에서 기존 보유분을 넘겨받음.
+        # 새로 시작하는 계좌는 빈 장부로 시작해서, 원래 들고 있던 종목은 절대 건드리지 않는다.
+        if "holdings" in data:
+            self.holdings: dict[str, dict[str, dict]] | None = data["holdings"] or {}
+        else:
+            self.holdings = None if data else {}
         # 슬리브별 마지막으로 자동 선정한 후보 종목
         self.universe: dict[str, list[str]] = data.get("universe", {})
         self.blocked: set[str] = set(data.get("blocked", []))

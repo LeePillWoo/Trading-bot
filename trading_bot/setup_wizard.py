@@ -218,6 +218,8 @@ class Wizard:
                                            default=" ".join(ns.core_symbols or CORE_SYMBOLS)).split()
         else:
             ns.core_strategy = None
+            ns.max_position = float(self.ask("  종목당 최대 비중 (0~1, 소액이면 0.5 권장)",
+                                             default=f"{ns.max_position:g}"))
             if ns.strategy == "dual_momentum" and len(ns.symbols) < 4:
                 print("  ⚠️ 듀얼 모멘텀은 후보 종목이 많을수록 의미가 있습니다 (5~15개 권장).")
         ns.confirm_real = mode == "real"

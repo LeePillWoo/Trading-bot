@@ -77,8 +77,11 @@ def test_stop_loss_blocks_per_sleeve(tmp_path):
 
 
 def test_existing_positions_adopted_for_single_strategy(tmp_path):
+    import json
     broker = PaperBroker(cash=1_000_000, prices={"A": prices()}, commission=0, sell_tax=0)
     broker.buy("A", 100)  # 업데이트 전부터 들고 있던 종목
+    # 장부 기능 이전 버전이 남긴 상태 파일
+    (tmp_path / "s.json").write_text(json.dumps({"date": "2026-10-16", "orders": 0, "blocked": []}))
     cfg = BotConfig(symbols=["A"], risk=RiskConfig(max_daily_loss_pct=0), commission=0)
     bot = TradingBot(broker, Fixed(0), cfg, state_path=tmp_path / "s.json", notifier=Recorder())
     bot.step(AM)
@@ -125,3 +128,19 @@ def test_zero_balance_skips_without_marking_month(tmp_path):
     bot.state.rebalanced = False
     bot.step(AM)
     assert "A" in bot.state.holdings["장기"]
+
+
+def test_fresh_account_never_touches_existing_holdings(tmp_path):
+    """새로 시작하는 계좌: 원래 들고 있던 종목이 목록에 있고 -80% 여도 손절하지 않는다."""
+    broker = PaperBroker(cash=100_000, prices={"A": prices()}, commission=0, sell_tax=0)
+    broker.buy("A", 100)
+    broker.prices["A"] = prices(20.0)  # -80%
+    cfg = BotConfig(symbols=["A"], risk=RiskConfig(stop_loss_pct=0.07, max_daily_loss_pct=0), commission=0)
+    for state in (None, {"date": "2026-10-20", "holdings": None}):  # 파일 없음 / 새 버전이 만든 빈 장부
+        path = tmp_path / f"s{state is None}.json"
+        if state is not None:
+            import json
+            path.write_text(json.dumps(state))
+        bot = TradingBot(broker, Fixed(0), cfg, state_path=path, notifier=Recorder())
+        bot.step(AM)
+        assert broker.positions["A"].qty == 100

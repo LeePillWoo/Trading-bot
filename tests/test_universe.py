@@ -113,3 +113,18 @@ def test_universe_failure_keeps_old_candidates(tmp_path):
     bot.step(datetime(2026, 10, 1, 9, 10, tzinfo=KST))
     assert "A" in broker.positions
     assert any("자동 갱신 실패" in m for m in rec.messages)
+
+
+def test_cheap_large_caps(tmp_path):
+    from trading_bot.universe import cheap_large_caps
+
+    def rec(code, name, cap, price):
+        r = bytearray(record(code, name, cap))
+        r[152:159] = f"{price:>7}".encode()
+        return bytes(r)
+
+    (tmp_path / "m_new_stock.mst").write_bytes(b"".join([
+        rec("005930", "*삼성전자", 5000000, 150000), rec("000660", "*SK하이닉스", 3000000, 600000),
+        rec("055550", "*신한지주", 400000, 25000), rec("034020", "*두산에너빌리티", 300000, 18000)]))
+    rows = cheap_large_caps(30000, cache_dir=tmp_path)
+    assert [(x.code, x.prev_close) for x in rows] == [("055550", 25000), ("034020", 18000)]

@@ -32,6 +32,7 @@ FIELDS = {
     "halted": (161, 1),     # 거래정지 Y
     "warn": (162, 1),       # 투자유의 Y
     "cap": (174, 12),       # 전일 시가총액(억)
+    "prev_close": (152, 7),  # 전일 종가
     "alert": (188, 1),      # 0:해당없음, 그 외 투자주의/경고/위험
     "liquidation": (189, 1),  # 정리매매 Y
 }
@@ -44,6 +45,7 @@ class Listing:
     market: str
     kind: str
     cap: float  # 억원
+    prev_close: float
     managed: bool
     halted: bool
     warn: bool
@@ -65,13 +67,15 @@ def parse_master(raw: bytes) -> list[Listing]:
     for i in range(0, len(raw) - RECORD + 1, RECORD):
         rec = raw[i:i + RECORD]
         f = {k: rec[s:s + n].decode("cp949", errors="replace").strip() for k, (s, n) in FIELDS.items()}
-        try:
-            cap = float(f["cap"].replace(",", "") or 0)
-        except ValueError:
-            cap = 0.0
+        def num(v):
+            try:
+                return float(v.replace(",", "") or 0)
+            except ValueError:
+                return 0.0
+        cap = num(f["cap"])
         out.append(Listing(
             code=f["code"], name=f["name"].lstrip("*#").strip(), market=f["market"], kind=f["kind"],
-            cap=cap, managed=f["managed"] == "Y", halted=f["halted"] == "Y", warn=f["warn"] == "Y",
+            cap=cap, prev_close=num(f["prev_close"]), managed=f["managed"] == "Y", halted=f["halted"] == "Y", warn=f["warn"] == "Y",
             alert=f["alert"], liquidation=f["liquidation"] == "Y",
         ))
     return out
@@ -80,6 +84,11 @@ def parse_master(raw: bytes) -> list[Listing]:
 def top_kospi(listings: list[Listing], n: int) -> list[Listing]:
     ok = [x for x in listings if x.is_common_kospi and not x.is_risky and x.cap > 0]
     return sorted(ok, key=lambda x: x.cap, reverse=True)[:n]
+
+
+def cheap_large_caps(max_price: float, top: int = 200, limit: int = 15, **kw) -> list[Listing]:
+    """코스피 시총 상위 top 종목 중 1주 가격(전일 종가)이 max_price 이하인 것, 시총 순."""
+    return [x for x in top_kospi(load_master(**kw), top) if 0 < x.prev_close <= max_price][:limit]
 
 
 def master_url(domain: str | None = None) -> str:

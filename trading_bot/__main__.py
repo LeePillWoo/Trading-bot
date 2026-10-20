@@ -102,6 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="매도 시 거래세 (주식 0.002, 국내 ETF 는 0)")
 
     sub.add_parser("setup", help="대화형 설정 마법사 (.env 생성)")
+    st = sub.add_parser("stocks", help="1주 가격이 싼 코스피 대형주 찾기 (소액용)")
+    st.add_argument("--max-price", type=float, default=30000, help="1주 최대 가격 (기본 3만원)")
+    st.add_argument("--top", type=int, default=200, help="코스피 시총 상위 몇 개 안에서 찾을지")
     sub.add_parser("telegram-setup", help="텔레그램 봇 연결 확인 및 chat_id 찾기")
 
     acc = sub.add_parser("accounts", help="나무증권 계좌 목록과 사용 가능 환경 확인")
@@ -284,6 +287,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "accounts":
         return cmd_accounts()
+    if args.command == "stocks":
+        from .universe import cheap_large_caps
+        rows = cheap_large_caps(args.max_price, args.top)
+        print(f"코스피 시총 상위 {args.top} 중 1주 {args.max_price:,.0f}원 이하 (시총 순, 전일 종가 기준)\n")
+        for i, x in enumerate(rows, 1):
+            print(f"{i:>2}. {x.code} {x.name}  {x.prev_close:,.0f}원  시총 {x.cap / 10000:,.1f}조")
+        if not rows:
+            print("조건에 맞는 종목이 없습니다. --max-price 를 올려보세요.")
+        return 0
     if args.command == "setup":
         from .setup_wizard import Wizard
         return Wizard().run()
