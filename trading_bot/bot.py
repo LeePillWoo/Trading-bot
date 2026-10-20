@@ -145,13 +145,15 @@ def flow_note(df: pd.DataFrame, days: int = 5) -> str:
     return f"외국인 {f:+,.0f}주 · 기관 {i:+,.0f}주"
 
 
-def format_account(acc: Account, start_equity: float = 0.0) -> str:
+def format_account(acc: Account, start_equity: float = 0.0, names: dict[str, str] | None = None) -> str:
     """계좌 요약. 손익은 입출금이 섞이므로 여기서 계산하지 않고 TradingBot.pnl_text 로 따로 보여준다."""
+    names = names or {}
     lines = [f"총자산 {acc.equity:,.0f}원 (현금 {acc.cash:,.0f}원)"]
     if acc.positions:
         for p in acc.positions.values():
             pnl = p.current_price / p.avg_price - 1 if p.avg_price else 0
-            lines.append(f"· {p.symbol} {p.qty}주 평단 {p.avg_price:,.0f} 현재 {p.current_price:,.0f} ({pnl:+.2%})")
+            label = f"{names[p.symbol]}({p.symbol})" if p.symbol in names else p.symbol
+            lines.append(f"· {label} {p.qty}주 평단 {p.avg_price:,.0f} 현재 {p.current_price:,.0f} ({pnl:+.2%})")
     else:
         lines.append("· 보유 종목 없음")
     return "\n".join(lines)
@@ -276,7 +278,7 @@ class TradingBot:
                 f"· 보유 평가 {held:+,.0f}원 · 누적 실현 {self.state.realized_total:+,.0f}원")
 
     def account_text(self, acc: Account) -> str:
-        return format_account(acc) + self.pnl_text(acc) + self.sleeve_summary(acc)
+        return format_account(acc, names=self.names) + self.pnl_text(acc) + self.sleeve_summary(acc)
 
     # ---------- 주문 헬퍼 ----------
     def _can_order(self) -> bool:
@@ -308,7 +310,7 @@ class TradingBot:
             self.ledger(sleeve).pop(symbol, None)
             self.state.realized_today += res.qty * (sell_price - held.get("ref", held["price"]))
             self.state.realized_total += res.qty * (sell_price - held["price"])
-            self.notify(f"🔵 {sleeve.tag}매도 주문 {symbol} {res.qty}주 ({reason}) 주문번호 {res.order_id}")
+            self.notify(f"🔵 {sleeve.tag}매도 주문 {self.label_of(symbol)} {res.qty}주 ({reason}) 주문번호 {res.order_id}")
         elif "수량" in res.message and not pos:
             # 증권사 기준으로도 팔 수량이 없음 (직접 매도한 경우 등) → 장부 정리
             self.ledger(sleeve).pop(symbol, None)
@@ -332,7 +334,7 @@ class TradingBot:
         self.state.orders += 1
         if res.ok:
             self.ledger(sleeve)[symbol] = {"qty": res.qty, "price": price, "ref": price}
-            self.notify(f"🔴 {sleeve.tag}매수 주문 {symbol} {res.qty}주 (약 {price:,.0f}원) 주문번호 {res.order_id}")
+            self.notify(f"🔴 {sleeve.tag}매수 주문 {self.label_of(symbol)} {res.qty}주 (약 {price:,.0f}원) 주문번호 {res.order_id}")
         else:
             self.notify_error(f"{sleeve.tag}매수 실패 {symbol}: {res.message}")
         self.state.save()
@@ -496,7 +498,7 @@ class TradingBot:
             self.state.portfolio_month[sleeve.name] = month
             self.state.save()
             held = [s for s, t in targets.items() if t] or ["없음 (전부 현금)"]
-            held = [self.label_of(s) if s in self.names else s for s in held]
+            held = [self.label_of(s) for s in held]
             return (f"📅 {sleeve.tag}{month} 월간 리밸런싱 완료\n보유: {', '.join(held)}\n"
                     + (f"{universe_note}\n" if universe_note else "")
                     + f"최근 {strategy.lookback}거래일 수익률\n{note}")
@@ -507,9 +509,10 @@ class TradingBot:
         if not targets:
             return f"{sleeve.tag}데이터 조회 실패 — 다음에 재시도"
         self._apply_targets(sleeve, targets, self.cfg.risk.max_position_pct, "매도 신호")
-        text = f"{sleeve.tag}신호: " + ", ".join(f"{s}:{'보유' if t else '미보유'}" for s, t in targets.items())
+        text = f"{sleeve.tag}신호\n" + "\n".join(f"· {self.label_of(s)}: {'보유' if t else '미보유'}"
+                                                 for s, t in targets.items())
         if self.flow_notes:
-            text += "\n수급 (최근 5일 순매수)" + "".join(f"\n· {s} {n}" for s, n in self.flow_notes.items())
+            text += "\n수급 (최근 5일 순매수)" + "".join(f"\n· {self.label_of(s)} {n}" for s, n in self.flow_notes.items())
         return text
 
     def rebalance(self, now: datetime) -> None:
@@ -555,7 +558,7 @@ class TradingBot:
             for sym, h in self.ledger(sl).items():
                 cur = acc.positions[sym].current_price if sym in acc.positions else h["price"]
                 value += h["qty"] * cur
-                items.append(f"{sym} {h['qty']}주 ({cur / h['price'] - 1:+.1%})")
+                items.append(f"{self.label_of(sym)} {h['qty']}주 ({cur / h['price'] - 1:+.1%})")
             lines.append(f"[{sl.name}] {sl.strategy.name} 비중 {sl.weight:.0%} · 투자 {value:,.0f}원 / "
                          f"한도 {equity:,.0f}원")
             lines.append("· " + (", ".join(items) if items else "보유 없음"))
@@ -586,7 +589,8 @@ class TradingBot:
     def describe(self) -> str:
         return "\n".join(f"{sl.tag}전략 {sl.strategy.name}" + (f" 비중 {sl.weight:.0%}" if sl.name else "")
                          + (f" · 후보 코스피 시총 상위 {sl.universe_top} (매달 자동 갱신)" if sl.universe_top
-                            else f" · 종목 {', '.join(sl.symbols)}") for sl in self.sleeves)
+                            else f" · 종목 {', '.join(self.label_of(s) for s in sl.symbols)}")
+                         for sl in self.sleeves)
 
     def handle_command(self, cmd: str) -> None:
         if cmd == "/stop":
@@ -633,7 +637,16 @@ class TradingBot:
             self.state.rebalanced = True
             self.state.save()
 
+    def load_names(self) -> None:
+        """종목명 표시용: 나무증권 종목마스터(공개 파일)에서 전 종목 이름을 받는다. 실패해도 코드만 표시."""
+        try:
+            from .universe import load_master
+            self.names.update({x.code: x.name for x in load_master()})
+        except Exception as e:
+            log.warning("종목명 불러오기 실패 (코드만 표시): %s", e)
+
     def run_forever(self) -> None:
+        self.load_names()
         log.info("자동매매 시작: %s 점검주기=%ds", self.describe(), self.cfg.interval_sec)
         keep_awake()
         paused = f"\n⛔ 현재 일시정지 상태 ({self.state.pause_reason}) — /start 로 재개" if self.state.paused else ""

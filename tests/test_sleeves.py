@@ -249,3 +249,21 @@ def test_single_strategy_report_shows_bot_holdings(tmp_path):
     bot.step(AM)
     bot.handle_command("/report")
     assert "봇 보유 종목" in rec.messages[-1] and "A 5000주 매수가 100" in rec.messages[-1]
+
+
+def test_names_shown_with_codes(tmp_path):
+    from trading_bot.broker.base import Position
+    broker = PaperBroker(cash=1_000_000, prices={"011200": prices(), "032640": prices()}, commission=0, sell_tax=0)
+    broker.positions["082210"] = Position("082210", 90, 8760, 1700)
+    broker.prices["082210"] = prices(1700.0)
+    cfg = BotConfig(symbols=["011200", "032640"], risk=RiskConfig(max_position_pct=0.5, max_daily_loss_pct=0),
+                    commission=0)
+    rec = Recorder()
+    bot = TradingBot(broker, Fixed(1), cfg, state_path=tmp_path / "s.json", notifier=rec)
+    bot.names.update({"011200": "HMM", "032640": "LG유플러스", "082210": "옵트론텍"})
+    bot.step(AM)
+    joined = "\n".join(rec.messages)
+    assert "매수 주문 HMM(011200)" in joined and "· LG유플러스(032640): 보유" in joined
+    bot.handle_command("/report")
+    assert "옵트론텍(082210) 90주" in rec.messages[-1] and "· HMM(011200) " in rec.messages[-1]
+    assert "종목 HMM(011200), LG유플러스(032640)" in rec.messages[-1]
