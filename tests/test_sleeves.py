@@ -239,3 +239,13 @@ def test_withdrawal_does_not_trigger_daily_loss(tmp_path):
     broker.cash -= 400_000  # 출금 (계좌 -40%)
     bot.step(AM)
     assert not bot.state.paused
+
+
+def test_single_strategy_report_shows_bot_holdings(tmp_path):
+    broker = PaperBroker(cash=1_000_000, prices={"A": prices()}, commission=0, sell_tax=0)
+    cfg = BotConfig(symbols=["A"], risk=RiskConfig(max_position_pct=0.5, max_daily_loss_pct=0), commission=0)
+    rec = Recorder()
+    bot = TradingBot(broker, Fixed(1), cfg, state_path=tmp_path / "s.json", notifier=rec)
+    bot.step(AM)
+    bot.handle_command("/report")
+    assert "봇 보유 종목" in rec.messages[-1] and "A 5000주 매수가 100" in rec.messages[-1]

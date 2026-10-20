@@ -537,7 +537,16 @@ class TradingBot:
 
     def sleeve_summary(self, acc: Account) -> str:
         if len(self.sleeves) == 1:
-            return ""
+            # 전략 하나: 봇 장부(봇이 산 종목). 산 지 2영업일 전엔 계좌 잔고 목록에 안 보일 수 있어 따로 표시
+            items = []
+            for sym, h in self.ledger(self.sleeves[0]).items():
+                try:
+                    cur = self._price(sym, acc)
+                except Exception:
+                    cur = h["price"]
+                items.append(f"· {self.label_of(sym)} {h['qty']}주 매수가 {h['price']:,.0f} "
+                             f"현재 {cur:,.0f} ({cur / h['price'] - 1:+.2%})")
+            return "\n\n봇 보유 종목\n" + ("\n".join(items) if items else "· 없음")
         lines = ["\n\n전략별 현황"]
         for sl in self.sleeves:
             equity, _ = self.budget(sl, acc)
