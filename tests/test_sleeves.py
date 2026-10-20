@@ -51,8 +51,9 @@ def test_budgets_and_shared_symbol(tmp_path):
     bot.step(AM)
     led = bot.state.holdings
     # 장기 70만원: A 35만원(50%) → 3500주, B 35만원 → 3500주 / 적극 30만원: A 15만원 → 1500주
-    assert led["장기"] == {"A": {"qty": 3500, "price": 100.0}, "B": {"qty": 3500, "price": 100.0}}
-    assert led["적극"] == {"A": {"qty": 1500, "price": 100.0}}
+    qp = lambda d: {k: (v["qty"], v["price"]) for k, v in d.items()}
+    assert qp(led["장기"]) == {"A": (3500, 100.0), "B": (3500, 100.0)}
+    assert qp(led["적극"]) == {"A": (1500, 100.0)}
     assert broker.positions["A"].qty == 5000
     assert "전략별 현황" in rec.messages[-1] and "[장기]" in rec.messages[-1]
 
@@ -101,7 +102,7 @@ def test_switching_to_split_mode_moves_holdings(tmp_path):
     cfg = BotConfig(symbols=["A"], risk=RiskConfig(max_daily_loss_pct=0), commission=0)
     single = TradingBot(broker, Fixed(1), cfg, state_path=tmp_path / "s.json", notifier=Recorder())
     single.step(AM)
-    assert single.state.holdings == {"": {"A": {"qty": 2000, "price": 100.0}}}
+    assert single.state.holdings[""]["A"]["qty"] == 2000
     sleeves = [Sleeve(Fixed(1), ["A", "B"], 0.7, "장기"), Sleeve(Fixed(1), ["A"], 0.3, "적극")]
     split = TradingBot(broker, sleeves, cfg, state_path=tmp_path / "s.json", notifier=Recorder())
     split.step(datetime(2026, 10, 20, 9, 10, tzinfo=KST))
@@ -205,3 +206,34 @@ def test_account_total_overrides_double_count():
     acc = Account(cash=259_710, positions={"X": Position("X", 90, 8760, 1720)}, total=259_710)
     assert acc.equity == 259_710
     assert Account(cash=100, positions={"X": Position("X", 1, 1, 50)}).equity == 150
+
+
+def test_bot_pnl_ignores_deposits_and_counts_realized(tmp_path):
+    broker = PaperBroker(cash=1_000_000, prices={"A": prices()}, commission=0, sell_tax=0)
+    cfg = BotConfig(symbols=["A"], risk=RiskConfig(max_position_pct=0.5, stop_loss_pct=0,
+                                                   max_daily_loss_pct=0.03), commission=0)
+    rec = Recorder()
+    bot = TradingBot(broker, Fixed(1), cfg, state_path=tmp_path / "s.json", notifier=rec)
+    bot.step(AM)  # A 5000주 @100
+    broker.cash += 5_000_000  # 입금
+    broker.prices["A"] = prices(110.0)
+    acc = broker.account()
+    today, realized, held = bot.bot_pnl(acc)
+    assert (today, realized, held) == (50_000, 0, 50_000)  # 입금은 손익에 안 들어감
+    bot.strategy = Fixed(0)
+    bot.state.rebalanced = False
+    bot.step(AM)  # 매도 → 실현
+    assert bot.state.realized_today == 50_000 and bot.state.realized_total == 50_000
+    assert not bot.state.paused
+    bot.handle_command("/status")
+    assert "봇 손익" in rec.messages[-1] and "오늘 +50,000원" in rec.messages[-1]
+
+
+def test_withdrawal_does_not_trigger_daily_loss(tmp_path):
+    broker = PaperBroker(cash=1_000_000, prices={"A": prices()}, commission=0, sell_tax=0)
+    cfg = BotConfig(symbols=["A"], risk=RiskConfig(max_position_pct=0.5, max_daily_loss_pct=0.03), commission=0)
+    bot = TradingBot(broker, Fixed(1), cfg, state_path=tmp_path / "s.json", notifier=Recorder())
+    bot.step(AM)
+    broker.cash -= 400_000  # 출금 (계좌 -40%)
+    bot.step(AM)
+    assert not bot.state.paused

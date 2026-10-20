@@ -79,6 +79,10 @@ class BotState:
         self.close_reported: bool = data.get("close_reported", False)
         self.holiday: bool = data.get("holiday", False)
         self.start_equity: float = data.get("start_equity", 0.0)
+        # 봇이 사고판 것만의 손익 (입출금·직접 매매 제외). 실현 손익은 매도 시점 현재가 기준 추정치
+        self.realized_today: float = data.get("realized_today", 0.0)
+        self.realized_total: float = data.get("realized_total", 0.0)
+        self.refs_date: str = data.get("refs_date", "")  # 장부의 오늘 기준가(ref)를 맞춘 날짜
         # 듀얼 모멘텀: 슬리브별 마지막 리밸런싱 달 (YYYY-MM)
         months = data.get("portfolio_month", {})
         self.portfolio_month: dict[str, str] = months if isinstance(months, dict) else {"": months}
@@ -101,6 +105,7 @@ class BotState:
             self.date, self.orders = today, 0
             self.rebalanced = self.close_reported = self.holiday = False
             self.start_equity = 0.0
+            self.realized_today = 0.0
             self.save()
 
     def save(self) -> None:
@@ -108,6 +113,8 @@ class BotState:
             "date": self.date, "orders": self.orders, "rebalanced": self.rebalanced,
             "close_reported": self.close_reported, "holiday": self.holiday,
             "start_equity": self.start_equity, "blocked": sorted(self.blocked),
+            "realized_today": self.realized_today, "realized_total": self.realized_total,
+            "refs_date": self.refs_date,
             "paused": self.paused, "pause_reason": self.pause_reason,
             "portfolio_month": self.portfolio_month, "holdings": self.holdings,
             "universe": self.universe,
@@ -124,9 +131,8 @@ def flow_note(df: pd.DataFrame, days: int = 5) -> str:
 
 
 def format_account(acc: Account, start_equity: float = 0.0) -> str:
+    """계좌 요약. 손익은 입출금이 섞이므로 여기서 계산하지 않고 TradingBot.pnl_text 로 따로 보여준다."""
     lines = [f"총자산 {acc.equity:,.0f}원 (현금 {acc.cash:,.0f}원)"]
-    if start_equity:
-        lines.append(f"오늘 손익 {acc.equity - start_equity:+,.0f}원 ({acc.equity / start_equity - 1:+.2%})")
     if acc.positions:
         for p in acc.positions.values():
             pnl = p.current_price / p.avg_price - 1 if p.avg_price else 0
@@ -229,6 +235,34 @@ class TradingBot:
                    for s, h in self.ledger(sleeve).items())
         return equity, max(0.0, min(equity - held, acc.cash))
 
+    # ---------- 봇 손익 ----------
+    def _price(self, symbol: str, acc: Account) -> float:
+        pos = acc.positions.get(symbol)
+        return pos.current_price if pos else self.broker.current_price(symbol)
+
+    def bot_pnl(self, acc: Account) -> tuple[float, float, float]:
+        """(오늘 봇 손익, 오늘 실현, 보유 평가손익(매수가 대비)). 입출금·직접 매매는 포함되지 않는다."""
+        today_unrealized = held_unrealized = 0.0
+        for sl in self.sleeves:
+            for sym, h in self.ledger(sl).items():
+                try:
+                    cur = self._price(sym, acc)
+                except Exception:
+                    continue
+                today_unrealized += h["qty"] * (cur - h.get("ref", h["price"]))
+                held_unrealized += h["qty"] * (cur - h["price"])
+        return self.state.realized_today + today_unrealized, self.state.realized_today, held_unrealized
+
+    def pnl_text(self, acc: Account) -> str:
+        today, realized, held = self.bot_pnl(acc)
+        base = self.state.start_equity or acc.equity
+        pct = f" ({today / base:+.2%})" if base else ""
+        return (f"\n봇 손익 (입출금·직접 매매 제외)\n· 오늘 {today:+,.0f}원{pct} · 오늘 실현 {realized:+,.0f}원\n"
+                f"· 보유 평가 {held:+,.0f}원 · 누적 실현 {self.state.realized_total:+,.0f}원")
+
+    def account_text(self, acc: Account) -> str:
+        return format_account(acc) + self.pnl_text(acc) + self.sleeve_summary(acc)
+
     # ---------- 주문 헬퍼 ----------
     def _can_order(self) -> bool:
         if self.state.paused:
@@ -249,10 +283,16 @@ class TradingBot:
         qty = min(held["qty"], pos.qty) if pos else held["qty"]
         if not self._can_order():
             return False
+        try:
+            sell_price = self._price(symbol, acc)
+        except Exception:
+            sell_price = held["price"]
         res = self.broker.sell(symbol, qty)
         self.state.orders += 1
         if res.ok:
             self.ledger(sleeve).pop(symbol, None)
+            self.state.realized_today += res.qty * (sell_price - held.get("ref", held["price"]))
+            self.state.realized_total += res.qty * (sell_price - held["price"])
             self.notify(f"🔵 {sleeve.tag}매도 주문 {symbol} {res.qty}주 ({reason}) 주문번호 {res.order_id}")
         elif "수량" in res.message and not pos:
             # 증권사 기준으로도 팔 수량이 없음 (직접 매도한 경우 등) → 장부 정리
@@ -276,7 +316,7 @@ class TradingBot:
         res = self.broker.buy(symbol, qty)
         self.state.orders += 1
         if res.ok:
-            self.ledger(sleeve)[symbol] = {"qty": res.qty, "price": price}
+            self.ledger(sleeve)[symbol] = {"qty": res.qty, "price": price, "ref": price}
             self.notify(f"🔴 {sleeve.tag}매수 주문 {symbol} {res.qty}주 (약 {price:,.0f}원) 주문번호 {res.order_id}")
         else:
             self.notify_error(f"{sleeve.tag}매수 실패 {symbol}: {res.message}")
@@ -314,10 +354,20 @@ class TradingBot:
         return targets, trading_day
 
     def check_risk(self, acc: Account) -> None:
-        """손절/익절 (슬리브 장부의 매수가 기준), 하루 손실 한도 (계좌 전체)."""
+        """손절/익절 (슬리브 장부의 매수가 기준), 하루 손실 한도 (봇 손익 기준, 입출금 제외)."""
         self.init_ledger(acc)
         if not self.state.start_equity:
             self.state.start_equity = acc.equity
+            self.state.save()
+        if self.state.refs_date != self.state.date:
+            # 하루의 시작: 보유 종목의 오늘 손익 기준가를 현재가로 맞춘다
+            for sl in self.sleeves:
+                for sym, h in self.ledger(sl).items():
+                    try:
+                        h["ref"] = self._price(sym, acc)
+                    except Exception:
+                        h["ref"] = h.get("ref", h["price"])
+            self.state.refs_date = self.state.date
             self.state.save()
         # 손절이 먼저: 손실 한도로 멈추기 전에 손실 종목부터 정리
         for sl in self.sleeves:
@@ -333,9 +383,10 @@ class TradingBot:
                     self.state.blocked.add(sl.key(sym))
                     self.state.save()
         limit = self.cfg.risk.max_daily_loss_pct
-        if limit and acc.equity <= self.state.start_equity * (1 - limit):
-            self.pause(f"하루 손실 한도 {limit:.0%} 도달 "
-                       f"({self.state.start_equity:,.0f} → {acc.equity:,.0f}원)")
+        today, _, _ = self.bot_pnl(acc)
+        if limit and self.state.start_equity and today <= -self.state.start_equity * limit:
+            self.pause(f"하루 손실 한도 {limit:.0%} 도달 (봇 손익 {today:+,.0f}원, "
+                       f"장 시작 자산 {self.state.start_equity:,.0f}원 기준)")
 
     def portfolio_targets(self, sleeve: Sleeve, today: pd.Timestamp) -> tuple[dict[str, int], bool, str]:
         """듀얼 모멘텀: (목표 포지션, 거래일 여부, 보고용 모멘텀 요약)."""
@@ -467,7 +518,7 @@ class TradingBot:
         if len(self.sleeves) == 1 and parts[0].startswith("📅"):
             title, parts = parts[0].split("\n", 1)[0], [parts[0].split("\n", 1)[1]]
         self.notify(f"{title}\n" + "\n\n".join(parts) + "\n\n주문 후 잔고\n"
-                    f"{format_account(acc, self.state.start_equity)}{self.sleeve_summary(acc)}")
+                    f"{self.account_text(acc)}")
 
     def sleeve_summary(self, acc: Account) -> str:
         if len(self.sleeves) == 1:
@@ -490,7 +541,7 @@ class TradingBot:
         state = f"⛔ 일시정지 ({self.state.pause_reason})" if self.state.paused else "✅ 정상 작동"
         try:
             acc = self.broker.account()
-            acc_text = format_account(acc, self.state.start_equity) + self.sleeve_summary(acc)
+            acc_text = self.account_text(acc)
         except Exception as e:
             acc_text = f"계좌 조회 실패: {e}"
         return (f"{state}\n{self.describe()}\n"
@@ -529,7 +580,7 @@ class TradingBot:
             self.state.close_reported = True
             self.state.save()
             acc = self.broker.account()
-            self.notify(f"🌙 장 마감 보고\n{format_account(acc, self.state.start_equity)}{self.sleeve_summary(acc)}")
+            self.notify(f"🌙 장 마감 보고\n{self.account_text(acc)}")
         if not is_market_open(now) or self.state.holiday or self.state.paused:
             return
         self.check_risk(self.broker.account())
