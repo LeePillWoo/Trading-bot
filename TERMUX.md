@@ -29,6 +29,11 @@ pkg update -y && pkg install -y git && (git -C ~/Trading-bot pull || git clone -
 | 봇 끄기 | `bash ~/Trading-bot/deploy/termux-stop.sh` |
 | 전략 비교 백테스트 (실제 과거 데이터) | `cd ~/Trading-bot && python -m trading_bot backtest --fetch --compare --symbols 005930 000660` |
 | 로그 보기 | `tail -f ~/Trading-bot/logs/trading.log` (끝내기: Ctrl+C) |
+| 설정 바꾸기 | `nano ~/Trading-bot/.env` 에서 `BOT_ARGS=` 줄 수정 → Ctrl+O, Enter, Ctrl+X → 봇 끄고 다시 켜기 |
+
+**장중 시세 기록 + 급등 알림 (선택)** — `BOT_ARGS` 끝에 ` --tick 60` 을 붙이면 장중 60초마다 시세를 `~/Trading-bot/data/ticks/` 에 쌓고,
+거래량이 평소의 5배 이상 + 전일 대비 3% 이상 오른 종목이 있으면 🚨 알림을 보냅니다 (알림만, 매매 없음).
+매매 종목 외에 감시할 종목은 ` --watch 035420 035720` 처럼 추가합니다. 나중에 단타 전략을 검증할 때 이 데이터를 씁니다.
 
 평소 확인·제어는 텔레그램 `/status` `/report` `/stop` `/start` 로 하면 됩니다 (`/rebalance` 오늘 매매 재실행, `/export` 기기 이사). 09:05·15:35 보고가 안 오면 봇이 꺼진 것입니다.
 

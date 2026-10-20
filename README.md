@@ -104,6 +104,19 @@ python -m trading_bot run --broker api --once
 - 상태(당일 매매 여부, 재진입 금지 종목)는 `bot_state_*.json`에 저장되어 재시작해도 유지
 - 로그: `logs/trading.log`
 
+### 장중 시세 기록 + 급등 알림 (`--tick`, 선택)
+
+나중에 단타 전략을 검증하려면 분 단위 시세가 필요합니다. `--tick 60`을 주면 장중 60초마다 매매 종목(과 `--watch` 종목)의
+현재가·누적 거래량을 `data/ticks/날짜.csv`에 쌓고, **거래량이 평소 같은 시간대의 N배 이상(`--spike-vol`, 기본 5) + 전일 대비
+`--spike-pct`(기본 3%) 이상 상승**이면 텔레그램으로 🚨 급등 알림을 보냅니다. 종목당 하루 한 번, **알림만 보내고 주문은 내지 않습니다.**
+
+```bash
+python -m trading_bot run --broker api --strategy breakout --symbols 005930 000660 \
+    --tick 60 --watch 035420 035720 --confirm-real
+```
+
+종목당 호출이 1회라 60초 주기면 관심 종목 100개까지도 호출 한도(초당 4회) 안입니다. 휴대폰에서는 배터리를 조금 더 씁니다.
+
 ## 전략
 
 | 이름 | 설명 | 파라미터 (기본값) |

@@ -154,8 +154,12 @@ def flow_note(df: pd.DataFrame, days: int = 5) -> str:
 class TradingBot:
     def __init__(self, broker: Broker, strategy: Strategy | list[Sleeve], config: BotConfig,
                  state_path: str | Path = "bot_state.json", trade_time: dtime = dtime(9, 5),
-                 notifier: Notifier | None = None, label: str = "", universe_loader=None):
+                 notifier: Notifier | None = None, label: str = "", universe_loader=None,
+                 watcher=None, tick_sec: int = 60):
         self.broker = broker
+        # 장중 시세 기록 + 급등 알림 (ticks.TickWatcher). None 이면 끔
+        self.watcher = watcher
+        self.tick_sec = tick_sec
         self.sleeves = strategy if isinstance(strategy, list) else [Sleeve(strategy, list(config.symbols))]
         if universe_loader is None:
             from .universe import kospi_top_symbols as universe_loader
@@ -640,10 +644,24 @@ class TradingBot:
         return f"📊 {b('계좌 보고서')} · {kdate(datetime.now(KST))}\n{esc(self.describe())}\n\n{body}"
 
     def describe(self) -> str:
-        return "\n".join(f"{sl.tag}전략 {sl.strategy.name}" + (f" 비중 {sl.weight:.0%}" if sl.name else "")
-                         + (f" · 후보 코스피 시총 상위 {sl.universe_top} (매달 자동 갱신)" if sl.universe_top
-                            else f" · 종목 {', '.join(self.label_of(s) for s in sl.symbols)}")
-                         for sl in self.sleeves)
+        lines = [f"{sl.tag}전략 {sl.strategy.name}" + (f" 비중 {sl.weight:.0%}" if sl.name else "")
+                 + (f" · 후보 코스피 시총 상위 {sl.universe_top} (매달 자동 갱신)" if sl.universe_top
+                    else f" · 종목 {', '.join(self.label_of(s) for s in sl.symbols)}")
+                 for sl in self.sleeves]
+        if self.watcher:
+            lines.append(f"👀 {self.watcher.describe()} ({self.tick_sec}초마다)")
+        return "\n".join(lines)
+
+    def tick(self, now: datetime | None = None) -> None:
+        """장중 시세 기록 + 급등 감지. 알림만 보내고 주문은 내지 않는다."""
+        now = now or datetime.now(KST)
+        if not self.watcher or not is_market_open(now) or self.state.holiday:
+            return
+        for s in self.watcher.poll(now):
+            self.notify(f"🚨 {b('급등 감지')} {esc(self.label_of(s.symbol))}\n"
+                        f"현재가 {won(s.price)} · 전일 대비 {arrow(s.change)} {pct(s.change)}\n"
+                        f"거래량 평소의 {s.vol_ratio:.1f}배\n"
+                        f"{i('알림만 보냅니다. 봇은 이 종목을 사지 않습니다.')}", html=True)
 
     def handle_command(self, cmd: str) -> None:
         if cmd == "/stop":
@@ -705,9 +723,16 @@ class TradingBot:
         paused = (f"\n\n⛔ {b('현재 일시정지 상태')} ({esc(self.state.pause_reason)}) — /start 로 재개"
                   if self.state.paused else "")
         self.notify(f"🤖 {b('자동매매 봇 시작')}\n{esc(self.describe())}{paused}\n\n{help_html()}", html=True)
-        next_step = 0.0
+        next_step = next_tick = 0.0
         next_heartbeat = time.monotonic() + HEARTBEAT_SEC
         while True:
+            if self.watcher and time.monotonic() >= next_tick:
+                try:
+                    self.tick()
+                except Exception as e:
+                    log.exception("시세 기록 중 오류")
+                    self.notify_error(str(e))
+                next_tick = time.monotonic() + self.tick_sec
             if time.monotonic() >= next_heartbeat:
                 # 꺼진 시각을 나중에 로그로 알 수 있도록 주기적으로 남긴다
                 log.info("작동 중 (일시정지=%s)", self.state.paused)
@@ -724,7 +749,10 @@ class TradingBot:
                 self.pause("다른 기기(휴대폰/컴퓨터)에서 같은 봇이 동시에 실행 중입니다. "
                            "한 곳만 남기고 끈 뒤 /start")
             # 다음 점검까지 텔레그램 명령을 기다린다 (롱폴링)
-            wait = max(1.0, min(next_step - time.monotonic(), 30))
+            wait = next_step - time.monotonic()
+            if self.watcher:
+                wait = min(wait, next_tick - time.monotonic())
+            wait = max(1.0, min(wait, 30))
             for cmd in self.notifier.poll_commands(timeout=wait):
                 try:
                     self.handle_command(cmd)

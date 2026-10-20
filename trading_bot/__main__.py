@@ -129,6 +129,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--interval", type=int, default=300, help="장중 점검 주기(초)")
     run.add_argument("--trade-time", default="09:05", help="일일 리밸런싱 시각 (HH:MM, KST)")
     run.add_argument("--once", action="store_true", help="한 번만 실행 (cron 용)")
+    run.add_argument("--tick", type=int, default=0,
+                     help="장중 시세 기록·급등 알림 주기(초). 0이면 끔. 예: 60")
+    run.add_argument("--watch", nargs="*", default=[], metavar="CODE",
+                     help="매매 종목 외에 시세를 기록하고 급등을 감시할 종목코드")
+    run.add_argument("--spike-vol", type=float, default=5.0, help="급등 알림: 거래량이 평소의 몇 배 이상 (기본 5)")
+    run.add_argument("--spike-pct", type=float, default=0.03, help="급등 알림: 전일 대비 상승률 (기본 0.03)")
     run.add_argument("--confirm-real", action="store_true",
                      help="실전 모드(NHPLUG_MODE/KIS_MODE=real)에서 주문을 허용하려면 반드시 지정")
     return p
@@ -356,8 +362,13 @@ def main(argv: list[str] | None = None) -> int:
         plan = [Sleeve(core, args.core_symbols or args.symbols, args.core_weight, "장기",
                        universe_top=args.core_top),
                 Sleeve(strategy, args.symbols, 1 - args.core_weight, "적극")]
+    watcher = None
+    if args.tick > 0:
+        from .ticks import TickWatcher
+        traded = [s for sl in (plan if isinstance(plan, list) else []) for s in sl.symbols] or args.symbols
+        watcher = TickWatcher(api, [*traded, *args.watch], vol_ratio=args.spike_vol, min_change=args.spike_pct)
     bot = TradingBot(broker, plan, cfg, state_path=state_path, trade_time=dtime(hh, mm),
-                     notifier=make_notifier(), label=label)
+                     notifier=make_notifier(), label=label, watcher=watcher, tick_sec=args.tick)
     if args.once:
         bot.step()
         acc = broker.account()
