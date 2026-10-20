@@ -49,8 +49,8 @@ COMMANDS = [("/status", "간단 상태"), ("/report", "자세한 계좌 보고�
             ("/help", "명령 목록")]
 
 
-def help_html() -> str:
-    return f"📖 {b('명령어')}\n" + "\n".join(f"{c} — {esc(d)}" for c, d in COMMANDS)
+def help_html(extra: list[tuple[str, str]] = ()) -> str:
+    return f"📖 {b('명령어')}\n" + "\n".join(f"{c} — {esc(d)}" for c, d in [*COMMANDS, *extra])
 
 
 def is_market_open(now: datetime) -> bool:
@@ -120,6 +120,8 @@ class BotState:
         # 일시정지는 날짜가 바뀌어도 유지 (사람이 /start 로 풀어야 함)
         self.paused: bool = data.get("paused", False)
         self.pause_reason: str = data.get("pause_reason", "")
+        # 단타 슬리브 상태 (scalp.ScalpManager 가 관리, 다른 장부와 분리)
+        self.scalp: dict = data.get("scalp", {})
 
     def roll(self, today: str) -> None:
         if self.date != today:
@@ -138,7 +140,7 @@ class BotState:
             "refs_date": self.refs_date,
             "paused": self.paused, "pause_reason": self.pause_reason,
             "portfolio_month": self.portfolio_month, "holdings": self.holdings,
-            "universe": self.universe,
+            "universe": self.universe, "scalp": self.scalp,
         }, ensure_ascii=False, indent=2))
 
 
@@ -155,11 +157,12 @@ class TradingBot:
     def __init__(self, broker: Broker, strategy: Strategy | list[Sleeve], config: BotConfig,
                  state_path: str | Path = "bot_state.json", trade_time: dtime = dtime(9, 5),
                  notifier: Notifier | None = None, label: str = "", universe_loader=None,
-                 watcher=None, tick_sec: int = 60):
+                 watcher=None, tick_sec: int = 60, scalp_cfg=None):
         self.broker = broker
         # 장중 시세 기록 + 급등 알림 (ticks.TickWatcher). None 이면 끔
         self.watcher = watcher
         self.tick_sec = tick_sec
+        self.scalp = None  # 승인형 단타 (scalp.ScalpManager). watcher 가 있어야 동작
         self.sleeves = strategy if isinstance(strategy, list) else [Sleeve(strategy, list(config.symbols))]
         if universe_loader is None:
             from .universe import kospi_top_symbols as universe_loader
@@ -175,6 +178,13 @@ class TradingBot:
         self.label = label
         self._last_errors: dict[str, float] = {}
         self.flow_notes: dict[str, str] = {}
+        if scalp_cfg and scalp_cfg.budget_pct > 0:
+            from .scalp import ScalpManager
+            self.scalp = ScalpManager(self, scalp_cfg)
+
+    def help(self) -> str:
+        from .scalp import SCALP_COMMANDS
+        return help_html(SCALP_COMMANDS if self.scalp else ())
 
     @property
     def strategy(self) -> Strategy:
@@ -632,8 +642,9 @@ class TradingBot:
                      f"📈 오늘 {signed_won(today)} · 보유 평가 {signed_won(held)}")
         except Exception as e:
             money = f"계좌 조회 실패: {esc(e)}"
+        scalp = f"\n{self.scalp.status_html()}" if self.scalp else ""
         return (f"{state}\n오늘 주문 {self.state.orders}회 · 오늘 매매 {'완료' if self.state.rebalanced else '대기'}\n"
-                f"{money}\n\n자세히: /report")
+                f"{money}{scalp}\n\n자세히: /report")
 
     def report_text(self) -> str:
         """/report: 자세한 보고 (전략 구성, 계좌, 봇 손익, 보유 종목)."""
@@ -650,6 +661,8 @@ class TradingBot:
                  for sl in self.sleeves]
         if self.watcher:
             lines.append(f"👀 {self.watcher.describe()} ({self.tick_sec}초마다)")
+        if self.scalp:
+            lines.append(self.scalp.describe())
         return "\n".join(lines)
 
     def tick(self, now: datetime | None = None) -> None:
@@ -658,10 +671,13 @@ class TradingBot:
         if not self.watcher or not is_market_open(now) or self.state.holiday:
             return
         for s in self.watcher.poll(now):
+            offer = self.scalp.offer(s.symbol, s.price, now) if self.scalp else None
+            tail = offer or i("알림만 보냅니다. 봇은 이 종목을 사지 않습니다.")
             self.notify(f"🚨 {b('급등 감지')} {esc(self.label_of(s.symbol))}\n"
                         f"현재가 {won(s.price)} · 전일 대비 {arrow(s.change)} {pct(s.change)}\n"
-                        f"거래량 평소의 {s.vol_ratio:.1f}배\n"
-                        f"{i('알림만 보냅니다. 봇은 이 종목을 사지 않습니다.')}", html=True)
+                        f"거래량 평소의 {s.vol_ratio:.1f}배\n{tail}", html=True)
+        if self.scalp:
+            self.scalp.on_tick(now)
 
     def handle_command(self, cmd: str) -> None:
         if cmd == "/stop":
@@ -688,8 +704,10 @@ class TradingBot:
             self.notify(self.status_text(), html=True)
         elif cmd == "/report":
             self.notify(self.report_text(), html=True)
+        elif cmd.startswith("/scalp") and self.scalp:
+            self.scalp.command(cmd, datetime.now(KST))
         else:
-            self.notify(help_html(), html=True)
+            self.notify(self.help(), html=True)
 
     def step(self, now: datetime | None = None) -> None:
         now = now or datetime.now(KST)
@@ -722,7 +740,7 @@ class TradingBot:
         keep_awake()
         paused = (f"\n\n⛔ {b('현재 일시정지 상태')} ({esc(self.state.pause_reason)}) — /start 로 재개"
                   if self.state.paused else "")
-        self.notify(f"🤖 {b('자동매매 봇 시작')}\n{esc(self.describe())}{paused}\n\n{help_html()}", html=True)
+        self.notify(f"🤖 {b('자동매매 봇 시작')}\n{esc(self.describe())}{paused}\n\n{self.help()}", html=True)
         next_step = next_tick = 0.0
         next_heartbeat = time.monotonic() + HEARTBEAT_SEC
         while True:

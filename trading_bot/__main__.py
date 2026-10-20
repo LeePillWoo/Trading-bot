@@ -135,6 +135,14 @@ def build_parser() -> argparse.ArgumentParser:
                      help="매매 종목 외에 시세를 기록하고 급등을 감시할 종목코드")
     run.add_argument("--spike-vol", type=float, default=5.0, help="급등 알림: 거래량이 평소의 몇 배 이상 (기본 5)")
     run.add_argument("--spike-pct", type=float, default=0.03, help="급등 알림: 전일 대비 상승률 (기본 0.03)")
+    run.add_argument("--scalp-budget", type=float, default=0.0,
+                     help="승인형 단타 켜기: 1회 매수 예산 (총자산 대비, 예 0.1). 0이면 끔. --tick 필요")
+    run.add_argument("--scalp-take", type=float, default=0.03, help="단타 목표 수익 (기본 0.03)")
+    run.add_argument("--scalp-stop", type=float, default=0.015, help="단타 손절 (기본 0.015)")
+    run.add_argument("--scalp-trail", type=float, default=0.015, help="단타 고점 대비 하락 시 정리 (기본 0.015)")
+    run.add_argument("--scalp-max-trades", type=int, default=5, help="단타 하루 최대 횟수 (기본 5)")
+    run.add_argument("--scalp-max-loss", type=float, default=0.02, help="단타 하루 손실 한도, 총자산 대비 (기본 0.02)")
+    run.add_argument("--scalp-close", default="15:20", help="단타 보유분 강제 정리 시각 (기본 15:20)")
     run.add_argument("--confirm-real", action="store_true",
                      help="실전 모드(NHPLUG_MODE/KIS_MODE=real)에서 주문을 허용하려면 반드시 지정")
     return p
@@ -367,8 +375,18 @@ def main(argv: list[str] | None = None) -> int:
         from .ticks import TickWatcher
         traded = [s for sl in (plan if isinstance(plan, list) else []) for s in sl.symbols] or args.symbols
         watcher = TickWatcher(api, [*traded, *args.watch], vol_ratio=args.spike_vol, min_change=args.spike_pct)
+    scalp_cfg = None
+    if args.scalp_budget > 0:
+        if not watcher:
+            raise ValueError("--scalp-budget 은 --tick (장중 시세 감시) 과 함께 써야 합니다 (예: --tick 60)")
+        from .scalp import ScalpConfig
+        ch, cm = map(int, args.scalp_close.split(":"))
+        scalp_cfg = ScalpConfig(budget_pct=args.scalp_budget, take_profit=args.scalp_take, stop_loss=args.scalp_stop,
+                                trail=args.scalp_trail, max_trades_per_day=args.scalp_max_trades,
+                                max_daily_loss_pct=args.scalp_max_loss, close_time=dtime(ch, cm))
     bot = TradingBot(broker, plan, cfg, state_path=state_path, trade_time=dtime(hh, mm),
-                     notifier=make_notifier(), label=label, watcher=watcher, tick_sec=args.tick)
+                     notifier=make_notifier(), label=label, watcher=watcher, tick_sec=args.tick,
+                     scalp_cfg=scalp_cfg)
     if args.once:
         bot.step()
         acc = broker.account()
