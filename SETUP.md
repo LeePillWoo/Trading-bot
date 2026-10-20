@@ -73,7 +73,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/LeePillWoo/Trading-bot/ccr-b
 
 | 명령 | 기능 |
 |---|---|
-| `/status` | 지금 상태와 잔고 |
+| `/status` | 간단 상태 (작동 여부, 오늘 주문, 봇 손익) |
+| `/report` | 자세한 계좌 보고서 (보유 종목, 전략별 현황) |
 | `/stop` | **비상정지** — 모든 자동 주문 중단 (보유 종목은 그대로, 필요하면 나무 앱에서 직접 매도) |
 | `/start` | 매매 재개 |
 

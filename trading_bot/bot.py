@@ -41,7 +41,7 @@ CLOSE_REPORT_TIME = dtime(15, 35)
 ERROR_NOTIFY_INTERVAL = 1800  # 같은 오류는 30분에 한 번만 알림
 HEARTBEAT_SEC = 3600  # 1시간마다 로그에 작동 기록
 
-HELP = ("/status 현재 상태\n/report 계좌 보고서\n/stop 비상정지 (모든 주문 중단)\n"
+HELP = ("/status 간단 상태\n/report 자세한 계좌 보고서\n/stop 비상정지 (모든 주문 중단)\n"
         "/start 매매 재개\n/rebalance 오늘 매매 다시 실행 (장중)\n/help 명령 목록")
 
 
@@ -538,15 +538,26 @@ class TradingBot:
         return "\n".join(lines)
 
     def status_text(self) -> str:
+        """/status: 짧은 상태 (살아 있는지, 일시정지, 오늘 주문, 봇 손익 한 줄)."""
         state = f"⛔ 일시정지 ({self.state.pause_reason})" if self.state.paused else "✅ 정상 작동"
         try:
             acc = self.broker.account()
-            acc_text = self.account_text(acc)
+            today, _, held = self.bot_pnl(acc)
+            n = sum(len(self.ledger(sl)) for sl in self.sleeves)
+            money = (f"총자산 {acc.equity:,.0f}원 · 봇 보유 {n}종목\n"
+                     f"봇 손익 오늘 {today:+,.0f}원 · 보유 평가 {held:+,.0f}원")
+        except Exception as e:
+            money = f"계좌 조회 실패: {e}"
+        return (f"{state}\n오늘 주문 {self.state.orders}회 · 오늘 매매 {'완료' if self.state.rebalanced else '대기'}\n"
+                f"{money}\n\n자세히: /report")
+
+    def report_text(self) -> str:
+        """/report: 자세한 보고 (전략 구성, 계좌, 보유 종목, 봇 손익, 전략별 현황)."""
+        try:
+            acc_text = self.account_text(self.broker.account())
         except Exception as e:
             acc_text = f"계좌 조회 실패: {e}"
-        return (f"{state}\n{self.describe()}\n"
-                f"오늘 주문 {self.state.orders}회 · 리밸런싱 {'완료' if self.state.rebalanced else '대기'}\n\n"
-                f"{acc_text}")
+        return f"📊 계좌 보고서\n{self.describe()}\n\n{acc_text}"
 
     def describe(self) -> str:
         return "\n".join(f"{sl.tag}전략 {sl.strategy.name}" + (f" 비중 {sl.weight:.0%}" if sl.name else "")
@@ -567,8 +578,10 @@ class TradingBot:
             self.state.portfolio_month = {}
             self.state.save()
             self.notify("🔁 다음 점검 때(최대 5분 안) 오늘 매매를 다시 실행합니다. 장중에만 동작합니다.")
-        elif cmd in ("/status", "/report"):
+        elif cmd == "/status":
             self.notify(self.status_text())
+        elif cmd == "/report":
+            self.notify(self.report_text())
         else:
             self.notify(HELP)
 

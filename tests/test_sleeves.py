@@ -226,7 +226,9 @@ def test_bot_pnl_ignores_deposits_and_counts_realized(tmp_path):
     assert bot.state.realized_today == 50_000 and bot.state.realized_total == 50_000
     assert not bot.state.paused
     bot.handle_command("/status")
-    assert "봇 손익" in rec.messages[-1] and "오늘 +50,000원" in rec.messages[-1]
+    assert "봇 손익 오늘 +50,000원" in rec.messages[-1]
+    bot.handle_command("/report")
+    assert "오늘 +50,000원" in rec.messages[-1] and "누적 실현 +50,000원" in rec.messages[-1]
 
 
 def test_withdrawal_does_not_trigger_daily_loss(tmp_path):

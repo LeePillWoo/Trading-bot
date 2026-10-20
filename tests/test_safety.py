@@ -87,7 +87,9 @@ def test_reports(tmp_path):
 def test_status_command(tmp_path):
     bot, _, rec = make(tmp_path)
     bot.handle_command("/status")
-    assert "정상 작동" in rec.messages[-1] and "총자산" in rec.messages[-1]
+    assert "정상 작동" in rec.messages[-1] and "총자산" in rec.messages[-1] and "/report" in rec.messages[-1]
+    bot.handle_command("/report")
+    assert "계좌 보고서" in rec.messages[-1] and "봇 손익" in rec.messages[-1]
     bot.handle_command("/whatever")
     assert "/stop" in rec.messages[-1]
 
