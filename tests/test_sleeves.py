@@ -5,6 +5,7 @@ import pandas as pd
 from trading_bot.bot import KST, Sleeve, TradingBot
 from trading_bot.broker.paper import PaperBroker
 from trading_bot.config import BotConfig, RiskConfig
+from trading_bot.fmt import strip_tags
 from trading_bot.notify import Notifier
 
 
@@ -12,8 +13,8 @@ class Recorder(Notifier):
     def __init__(self):
         self.messages = []
 
-    def send(self, text):
-        self.messages.append(text)
+    def send(self, text, **kw):
+        self.messages.append(strip_tags(text))
 
 
 class Fixed:
@@ -226,9 +227,9 @@ def test_bot_pnl_ignores_deposits_and_counts_realized(tmp_path):
     assert bot.state.realized_today == 50_000 and bot.state.realized_total == 50_000
     assert not bot.state.paused
     bot.handle_command("/status")
-    assert "봇 손익 오늘 +50,000원" in rec.messages[-1]
+    assert "오늘 🔺 +50,000원" in rec.messages[-1]
     bot.handle_command("/report")
-    assert "오늘 +50,000원" in rec.messages[-1] and "누적 실현 +50,000원" in rec.messages[-1]
+    assert "오늘 🔺 +50,000원" in rec.messages[-1] and "누적 실현 +50,000원" in rec.messages[-1]
 
 
 def test_withdrawal_does_not_trigger_daily_loss(tmp_path):
@@ -248,7 +249,7 @@ def test_single_strategy_report_shows_bot_holdings(tmp_path):
     bot = TradingBot(broker, Fixed(1), cfg, state_path=tmp_path / "s.json", notifier=rec)
     bot.step(AM)
     bot.handle_command("/report")
-    assert "봇 보유 종목" in rec.messages[-1] and "A 5000주 매수가 100" in rec.messages[-1]
+    assert "봇 보유 종목" in rec.messages[-1] and "A 5000주" in rec.messages[-1] and "100 → 100" in rec.messages[-1]
 
 
 def test_names_shown_with_codes(tmp_path):
@@ -263,7 +264,26 @@ def test_names_shown_with_codes(tmp_path):
     bot.names.update({"011200": "HMM", "032640": "LG유플러스", "082210": "옵트론텍"})
     bot.step(AM)
     joined = "\n".join(rec.messages)
-    assert "매수 주문 HMM(011200)" in joined and "· LG유플러스(032640): 보유" in joined
+    assert "매수 주문 HMM(011200)" in joined and "🟢 LG유플러스(032640) — 보유" in joined
     bot.handle_command("/report")
-    assert "옵트론텍(082210) 90주" in rec.messages[-1] and "· HMM(011200) " in rec.messages[-1]
+    assert "옵트론텍(082210) 90주" in rec.messages[-1] and "HMM(011200) " in rec.messages[-1]
     assert "종목 HMM(011200), LG유플러스(032640)" in rec.messages[-1]
+
+
+def test_partial_sell_keeps_remainder_in_ledger(tmp_path):
+    """증권사가 매도 가능 수량만큼만 받아주면 남은 수량은 장부에 남겨 계속 관리한다."""
+    class CappedBroker(PaperBroker):
+        def sell(self, symbol, qty, price=0):
+            return super().sell(symbol, min(qty, 3))
+
+    broker = CappedBroker(cash=1_000_000, prices={"A": prices()}, commission=0, sell_tax=0)
+    cfg = BotConfig(symbols=["A"], risk=RiskConfig(max_position_pct=0.5, max_daily_loss_pct=0), commission=0)
+    rec = Recorder()
+    bot = TradingBot(broker, Fixed(1), cfg, state_path=tmp_path / "s.json", notifier=rec)
+    bot.step(AM)  # 5000주 매수
+    bot.strategy = Fixed(0)
+    bot.state.rebalanced = False
+    bot.step(AM)  # 매도 신호 → 3주만 접수
+    assert bot.state.holdings[""]["A"]["qty"] == 4997
+    assert broker.positions["A"].qty == 4997
+    assert any("3주만 매도 접수" in m for m in rec.messages)

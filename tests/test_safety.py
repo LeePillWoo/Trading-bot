@@ -5,6 +5,7 @@ import pandas as pd
 from trading_bot.bot import KST, TradingBot
 from trading_bot.broker.paper import PaperBroker
 from trading_bot.config import BotConfig, RiskConfig
+from trading_bot.fmt import strip_tags
 from trading_bot.notify import Notifier, TelegramNotifier
 
 
@@ -12,8 +13,8 @@ class Recorder(Notifier):
     def __init__(self):
         self.messages = []
 
-    def send(self, text):
-        self.messages.append(text)
+    def send(self, text, **kw):
+        self.messages.append(strip_tags(text))
 
 
 class On:

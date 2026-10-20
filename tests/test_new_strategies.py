@@ -8,6 +8,7 @@ from trading_bot.bot import KST, TradingBot
 from trading_bot.broker.paper import PaperBroker
 from trading_bot.config import BotConfig, RiskConfig
 from trading_bot.data import synthetic_ohlcv
+from trading_bot.fmt import strip_tags
 from trading_bot.notify import Notifier
 from trading_bot.strategy import DualMomentumStrategy, VolatilityBreakoutStrategy
 
@@ -73,8 +74,8 @@ class Recorder(Notifier):
     def __init__(self):
         self.messages = []
 
-    def send(self, text):
-        self.messages.append(text)
+    def send(self, text, **kw):
+        self.messages.append(strip_tags(text))
 
 
 def test_bot_dual_momentum_once_per_month(tmp_path):

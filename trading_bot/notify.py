@@ -10,6 +10,7 @@ import time
 
 import requests
 
+from .fmt import strip_tags
 from .redact import redact
 
 log = logging.getLogger(__name__)
@@ -22,8 +23,8 @@ class Notifier:
     # 같은 봇 토큰으로 다른 곳에서도 명령을 받고 있으면 True (텔레그램 409 Conflict)
     conflict = False
 
-    def send(self, text: str) -> None:
-        log.info("[알림] %s", text)
+    def send(self, text: str, html: bool = False) -> None:
+        log.info("[알림] %s", strip_tags(text) if html else text)
 
     def poll_commands(self, timeout: float = 0) -> list[str]:
         if timeout > 0:
@@ -40,12 +41,20 @@ class TelegramNotifier(Notifier):
         self.session = session or requests.Session()
         self._offset: int | None = None
 
-    def send(self, text: str) -> None:
+    def send(self, text: str, html: bool = False) -> None:
+        """html=True 면 텔레그램 HTML 서식(굵게 등)으로 보낸다. 서식 오류로 거부되면 일반 텍스트로 재전송."""
         text = redact(text)
-        log.info("[알림] %s", text)
+        log.info("[알림] %s", strip_tags(text) if html else text)
+        payload = {"chat_id": self.chat_id, "text": text[:4000]}
+        if html:
+            payload["parse_mode"] = "HTML"
         try:
-            self.session.post(f"{self.base}/sendMessage",
-                              json={"chat_id": self.chat_id, "text": text[:4000]}, timeout=10)
+            resp = self.session.post(f"{self.base}/sendMessage", json=payload, timeout=10)
+            if html and getattr(resp, "ok", True) is False:
+                log.warning("텔레그램 서식 메시지 거부 (HTTP %s) — 일반 텍스트로 재전송",
+                            getattr(resp, "status_code", "?"))
+                self.session.post(f"{self.base}/sendMessage",
+                                  json={"chat_id": self.chat_id, "text": strip_tags(text)[:4000]}, timeout=10)
         except requests.RequestException as e:
             # 예외 문자열에는 봇 토큰이 든 URL 이 들어가므로 종류만 남긴다
             log.warning("텔레그램 전송 실패 (%s)", type(e).__name__)

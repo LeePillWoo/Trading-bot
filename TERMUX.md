@@ -30,7 +30,7 @@ pkg update -y && pkg install -y git && (git -C ~/Trading-bot pull || git clone -
 | 전략 비교 백테스트 (실제 과거 데이터) | `cd ~/Trading-bot && python -m trading_bot backtest --fetch --compare --symbols 005930 000660` |
 | 로그 보기 | `tail -f ~/Trading-bot/logs/trading.log` (끝내기: Ctrl+C) |
 
-평소 확인·제어는 텔레그램 `/status` `/stop` `/start` 로 하면 됩니다. 09:05·15:35 보고가 안 오면 봇이 꺼진 것입니다.
+평소 확인·제어는 텔레그램 `/status` `/report` `/stop` `/start` 로 하면 됩니다 (`/rebalance` 오늘 매매 재실행, `/export` 기기 이사). 09:05·15:35 보고가 안 오면 봇이 꺼진 것입니다.
 
 ## 권장: 손절은 증권사 감시주문으로도 걸어두기
 

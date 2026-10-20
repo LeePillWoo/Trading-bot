@@ -74,6 +74,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/LeePillWoo/Trading-bot/ccr-b
 | 명령 | 기능 |
 |---|---|
 | `/status` | 간단 상태 (작동 여부, 오늘 주문, 봇 손익) |
+| `/rebalance` | 오늘 매매를 다시 실행 (장중, 최대 5분 안) |
+| `/export` | 기기 이사용 상태 내보내기 (키·토큰 없음) |
 | `/report` | 자세한 계좌 보고서 (보유 종목, 전략별 현황) |
 | `/stop` | **비상정지** — 모든 자동 주문 중단 (보유 종목은 그대로, 필요하면 나무 앱에서 직접 매도) |
 | `/start` | 매매 재개 |
