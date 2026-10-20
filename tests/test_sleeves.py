@@ -166,3 +166,42 @@ def test_month_not_marked_when_buy_fails_and_rebalance_command(tmp_path):
     bot.handle_command("/rebalance")
     bot.step(AM)
     assert "A" in bot.state.holdings["장기"] and bot.state.portfolio_month == {"장기": "2026-10"}
+
+
+def test_unsettled_buy_not_dropped_from_ledger(tmp_path):
+    """산 주식이 결제 전이라 잔고에 안 보여도 장부를 지우지 않고, 손절/매도 신호 때 정상 매도."""
+    broker = PaperBroker(cash=1_000_000, prices={"A": prices()}, commission=0, sell_tax=0)
+    cfg = BotConfig(symbols=["A"], risk=RiskConfig(max_position_pct=0.5, stop_loss_pct=0.05,
+                                                   max_daily_loss_pct=0), commission=0)
+    bot = TradingBot(broker, Fixed(1), cfg, state_path=tmp_path / "s.json", notifier=Recorder())
+    bot.step(AM)
+    real_account = broker.account
+    # 잔고 조회에 A 가 아직 안 보이는 상황
+    from trading_bot.broker.base import Account
+    broker.account = lambda: Account(cash=broker.cash, positions={}, total=1_000_000)
+    bot.strategy = Fixed(0)
+    bot.state.rebalanced = False
+    bot.step(AM)
+    assert "A" not in broker.positions  # 장부 수량으로 매도 주문이 나감
+    assert "A" not in bot.state.holdings[""]
+    broker.account = real_account
+
+
+def test_manual_sell_cleans_ledger(tmp_path):
+    broker = PaperBroker(cash=1_000_000, prices={"A": prices()}, commission=0, sell_tax=0)
+    cfg = BotConfig(symbols=["A"], risk=RiskConfig(max_position_pct=0.5, max_daily_loss_pct=0), commission=0)
+    rec = Recorder()
+    bot = TradingBot(broker, Fixed(1), cfg, state_path=tmp_path / "s.json", notifier=rec)
+    bot.step(AM)
+    broker.sell("A", broker.positions["A"].qty)  # 사용자가 직접 매도
+    bot.strategy = Fixed(0)
+    bot.state.rebalanced = False
+    bot.step(AM)
+    assert bot.state.holdings[""] == {} and any("장부에서 정리" in m for m in rec.messages)
+
+
+def test_account_total_overrides_double_count():
+    from trading_bot.broker.base import Account, Position
+    acc = Account(cash=259_710, positions={"X": Position("X", 90, 8760, 1720)}, total=259_710)
+    assert acc.equity == 259_710
+    assert Account(cash=100, positions={"X": Position("X", 1, 1, 50)}).equity == 150

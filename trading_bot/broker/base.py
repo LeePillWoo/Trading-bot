@@ -19,9 +19,14 @@ class Position:
 class Account:
     cash: float  # 주문 가능 현금
     positions: dict[str, Position]
+    # 증권사가 계산한 순자산 (있으면 이 값을 총자산으로 사용).
+    # 결제 전(2영업일) 매도분이 현금과 잔고에 동시에 잡히는 이중 계산을 피하기 위함.
+    total: float = 0.0
 
     @property
     def equity(self) -> float:
+        if self.total > 0:
+            return self.total
         return self.cash + sum(p.qty * p.current_price for p in self.positions.values())
 
 

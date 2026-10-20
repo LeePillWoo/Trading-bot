@@ -241,12 +241,12 @@ class TradingBot:
     def _sell(self, sleeve: Sleeve, symbol: str, acc: Account, reason: str) -> bool:
         """슬리브 장부에 있는 자기 몫만 매도."""
         held = self.ledger(sleeve).get(symbol)
-        pos = acc.positions.get(symbol)
-        qty = min(held["qty"], pos.qty) if held and pos else 0
-        if qty <= 0:
-            self.ledger(sleeve).pop(symbol, None)  # 계좌에 없으면 장부 정리
-            self.state.save()
+        if not held:
             return False
+        pos = acc.positions.get(symbol)
+        # 산 지 2영업일이 안 된 주식은 잔고(결제 기준)에 안 보일 수 있다 → 장부 수량으로 주문하고
+        # 실제 매도 가능 수량 제한은 증권사(매도가능수량 조회)에 맡긴다
+        qty = min(held["qty"], pos.qty) if pos else held["qty"]
         if not self._can_order():
             return False
         res = self.broker.sell(symbol, qty)
@@ -254,6 +254,11 @@ class TradingBot:
         if res.ok:
             self.ledger(sleeve).pop(symbol, None)
             self.notify(f"🔵 {sleeve.tag}매도 주문 {symbol} {res.qty}주 ({reason}) 주문번호 {res.order_id}")
+        elif "수량" in res.message and not pos:
+            # 증권사 기준으로도 팔 수량이 없음 (직접 매도한 경우 등) → 장부 정리
+            self.ledger(sleeve).pop(symbol, None)
+            self.notify(f"ℹ️ {sleeve.tag}{symbol}: 계좌에 매도 가능 수량이 없어 장부에서 정리했습니다 "
+                        f"(직접 매도하셨나요?)")
         else:
             self.notify_error(f"{sleeve.tag}매도 실패 {symbol}: {res.message}")
         self.state.save()
@@ -318,9 +323,12 @@ class TradingBot:
         for sl in self.sleeves:
             for sym, held in list(self.ledger(sl).items()):
                 pos = acc.positions.get(sym)
-                if not pos:
+                try:  # 결제 전이라 잔고에 안 보이면 현재가를 따로 조회
+                    price = pos.current_price if pos else self.broker.current_price(sym)
+                except Exception:
+                    log.exception("%s 현재가 조회 실패", sym)
                     continue
-                reason = exit_reason(held["price"], pos.current_price, self.cfg.risk)
+                reason = exit_reason(held["price"], price, self.cfg.risk)
                 if reason and self._sell(sl, sym, acc, reason):
                     self.state.blocked.add(sl.key(sym))
                     self.state.save()

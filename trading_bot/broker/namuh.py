@@ -242,7 +242,8 @@ class NamuhBroker(Broker):
                 positions[sym] = Position(sym, qty, _num(r.get("phs_pr")), _num(r.get("now_pr")))
         # D+2 예수금(결제 예정분 반영)을 주문 가능 현금으로 사용
         cash = _num(summary.get("nxt2_dd_dca")) or _num(summary.get("dca"))
-        return Account(cash=cash, positions=positions)
+        # 보유 수량은 결제 기준이라 판 주식이 2영업일간 남아 보임 → 총자산은 증권사 순자산 사용
+        return Account(cash=cash, positions=positions, total=_num(summary.get("nas_amt")))
 
     def buyable_quantity(self, symbol: str, price: float = 0) -> int:
         """미수 없이 현금으로 살 수 있는 수량."""
