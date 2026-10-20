@@ -289,27 +289,47 @@ class TradingBot:
         return out
 
     def holding_lines(self, sleeve: Sleeve, acc: Account) -> list[str]:
+        """종목당 3줄: 손익 요약 / 매수 단가 × 수량 = 매수금액 / 현재 단가 × 수량 = 평가금액."""
         lines = []
         for sym, h, cur in self._holdings(sleeve, acc):
-            diff = (cur - h["price"]) * h["qty"]
-            r = cur / h["price"] - 1 if h["price"] else 0.0
-            lines.append(f"{b(self.label_of(sym))} {h['qty']}주 {arrow(diff)} {pct(r)}\n"
-                         f"  {h['price']:,.0f} → {cur:,.0f} ({diff:+,.0f}원)")
+            qty = h["qty"]
+            cost, value = h["price"] * qty, cur * qty
+            diff = value - cost
+            r = diff / cost if cost else 0.0
+            lines.append(f"{b(self.label_of(sym))} {qty}주 {arrow(diff)} {b(f'{diff:+,.0f}원')} ({pct(r)})\n"
+                         f"  매수 {h['price']:,.0f} × {qty} = {won(cost)}\n"
+                         f"  현재 {cur:,.0f} × {qty} = {won(value)}")
         return lines
+
+    def _totals(self, sleeve: Sleeve, acc: Account) -> tuple[float, float]:
+        """(매수금액 합계, 평가금액 합계)."""
+        rows = self._holdings(sleeve, acc)
+        return sum(h["price"] * h["qty"] for _, h, _ in rows), sum(cur * h["qty"] for _, h, cur in rows)
+
+    @staticmethod
+    def _total_line(cost: float, value: float) -> str:
+        diff = value - cost
+        return (f"{i('합계')} 매수 {won(cost)} → 평가 {won(value)} · "
+                f"{arrow(diff)} {b(f'{diff:+,.0f}원')} ({pct(diff / cost if cost else 0.0)})")
 
     def holdings_section(self, acc: Account) -> str:
         """봇이 산 종목 (장부 기준). 산 지 2영업일 전엔 계좌 잔고 목록에 안 보일 수 있어 장부로 보여준다."""
         if len(self.sleeves) == 1:
-            lines = self.holding_lines(self.sleeves[0], acc)
+            sl = self.sleeves[0]
+            lines = self.holding_lines(sl, acc)
+            if lines:
+                lines.append(self._total_line(*self._totals(sl, acc)))
             text = f"📦 {b('봇 보유 종목')}\n" + ("\n".join(lines) if lines else "없음")
         else:
             parts = [f"📦 {b('전략별 현황')}"]
             for sl in self.sleeves:
                 equity, _ = self.budget(sl, acc)
-                value = sum(h["qty"] * cur for _, h, cur in self._holdings(sl, acc))
+                cost, value = self._totals(sl, acc)
                 parts.append(f"{b(f'[{sl.name}]')} {esc(sl.strategy.name)} {sl.weight:.0%} · "
                              f"투자 {won(value)} / 한도 {won(equity)}")
                 lines = self.holding_lines(sl, acc)
+                if lines:
+                    lines.append(self._total_line(cost, value))
                 parts.append("\n".join(lines) if lines else "보유 없음")
             text = "\n".join(parts)
         managed = {sym for sl in self.sleeves for sym in self.ledger(sl)}
@@ -358,10 +378,13 @@ class TradingBot:
                 self.ledger(sleeve).pop(symbol, None)
             self.state.realized_today += res.qty * (sell_price - held.get("ref", held["price"]))
             self.state.realized_total += res.qty * (sell_price - held["price"])
-            diff = res.qty * (sell_price - held["price"])
+            cost, proceeds = res.qty * held["price"], res.qty * sell_price
+            diff = proceeds - cost
             self.notify(f"🔵 {b(f'{sleeve.tag}매도 주문')} {esc(self.label_of(symbol))}\n"
                         f"{res.qty}주 · {esc(reason)}\n"
-                        f"매수가 {held['price']:,.0f} → 약 {sell_price:,.0f} ({signed_won(diff)})\n"
+                        f"매수 {held['price']:,.0f} × {res.qty} = {won(cost)}\n"
+                        f"매도 약 {sell_price:,.0f} × {res.qty} = 약 {won(proceeds)}\n"
+                        f"{arrow(diff)} {b(f'{diff:+,.0f}원')} ({pct(diff / cost if cost else 0.0)})\n"
                         f"주문번호 {esc(res.order_id)}", html=True)
         elif "수량" in res.message and not pos:
             # 증권사 기준으로도 팔 수량이 없음 (직접 매도한 경우 등) → 장부 정리
@@ -387,7 +410,7 @@ class TradingBot:
         if res.ok:
             self.ledger(sleeve)[symbol] = {"qty": res.qty, "price": price, "ref": price}
             self.notify(f"🔴 {b(f'{sleeve.tag}매수 주문')} {esc(self.label_of(symbol))}\n"
-                        f"{res.qty}주 × 약 {price:,.0f}원 = 약 {won(res.qty * price)}\n"
+                        f"매수 약 {price:,.0f} × {res.qty} = 약 {won(res.qty * price)}\n"
                         f"주문번호 {esc(res.order_id)}", html=True)
         else:
             self.notify_error(f"{sleeve.tag}매수 실패 {self.label_of(symbol)}: {res.message}")

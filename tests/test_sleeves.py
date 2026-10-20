@@ -249,7 +249,8 @@ def test_single_strategy_report_shows_bot_holdings(tmp_path):
     bot = TradingBot(broker, Fixed(1), cfg, state_path=tmp_path / "s.json", notifier=rec)
     bot.step(AM)
     bot.handle_command("/report")
-    assert "봇 보유 종목" in rec.messages[-1] and "A 5000주" in rec.messages[-1] and "100 → 100" in rec.messages[-1]
+    assert "봇 보유 종목" in rec.messages[-1] and "A 5000주" in rec.messages[-1]
+    assert "매수 100 × 5000 = 500,000원" in rec.messages[-1] and "합계 매수 500,000원" in rec.messages[-1]
 
 
 def test_names_shown_with_codes(tmp_path):
