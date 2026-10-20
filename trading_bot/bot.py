@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, time as dtime
@@ -42,7 +43,8 @@ ERROR_NOTIFY_INTERVAL = 1800  # 같은 오류는 30분에 한 번만 알림
 HEARTBEAT_SEC = 3600  # 1시간마다 로그에 작동 기록
 
 HELP = ("/status 간단 상태\n/report 자세한 계좌 보고서\n/stop 비상정지 (모든 주문 중단)\n"
-        "/start 매매 재개\n/rebalance 오늘 매매 다시 실행 (장중)\n/help 명령 목록")
+        "/start 매매 재개\n/rebalance 오늘 매매 다시 실행 (장중)\n/export 기기 이사용 상태 내보내기\n"
+        "/help 명령 목록")
 
 
 def is_market_open(now: datetime) -> bool:
@@ -65,6 +67,19 @@ class Sleeve:
     @property
     def tag(self) -> str:
         return f"[{self.name}] " if self.name else ""
+
+
+def keep_awake() -> None:
+    """윈도우: 봇이 실행되는 동안 컴퓨터가 절전 모드로 들어가지 않게 한다 (화면은 꺼져도 됨)."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+        log.info("윈도우 절전 방지 설정")
+    except Exception:
+        log.warning("윈도우 절전 방지 설정 실패", exc_info=True)
 
 
 class BotState:
@@ -578,6 +593,13 @@ class TradingBot:
             self.state.portfolio_month = {}
             self.state.save()
             self.notify("🔁 다음 점검 때(최대 5분 안) 오늘 매매를 다시 실행합니다. 장중에만 동작합니다.")
+        elif cmd == "/export":
+            from .migrate import export_text
+            text = export_text([self.state.path])
+            self.notify("📦 기기 이사용 상태입니다 (키·토큰 없음). 아래 다음 메시지 전체를 복사해서 "
+                        "새 기기에서 `python -m trading_bot import-state` 에 붙여넣으세요.\n"
+                        "⚠️ 가져오기 전에 이 기기의 봇은 꺼야 합니다.")
+            self.notifier.send(text)  # 라벨 없이 그대로 (복사하기 쉽게)
         elif cmd == "/status":
             self.notify(self.status_text())
         elif cmd == "/report":
@@ -604,6 +626,7 @@ class TradingBot:
 
     def run_forever(self) -> None:
         log.info("자동매매 시작: %s 점검주기=%ds", self.describe(), self.cfg.interval_sec)
+        keep_awake()
         paused = f"\n⛔ 현재 일시정지 상태 ({self.state.pause_reason}) — /start 로 재개" if self.state.paused else ""
         self.notify(f"🤖 자동매매 봇 시작\n{self.describe()}{paused}\n\n{HELP}")
         next_step = 0.0
@@ -620,6 +643,10 @@ class TradingBot:
                     log.exception("루프 실행 중 오류")
                     self.notify_error(str(e))
                 next_step = time.monotonic() + self.cfg.interval_sec
+            if getattr(self.notifier, "conflict", False) and not self.state.paused:
+                # 같은 계좌로 두 곳에서 동시에 돌면 주문이 두 번 나가고 장부가 엇갈린다
+                self.pause("다른 기기(휴대폰/컴퓨터)에서 같은 봇이 동시에 실행 중입니다. "
+                           "한 곳만 남기고 끈 뒤 /start")
             # 다음 점검까지 텔레그램 명령을 기다린다 (롱폴링)
             wait = max(1.0, min(next_step - time.monotonic(), 30))
             for cmd in self.notifier.poll_commands(timeout=wait):

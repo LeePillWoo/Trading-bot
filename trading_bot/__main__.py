@@ -102,6 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="매도 시 거래세 (주식 0.002, 국내 ETF 는 0)")
 
     sub.add_parser("setup", help="대화형 설정 마법사 (.env 생성)")
+    sub.add_parser("export-state", help="기기 이사용: 봇 상태를 한 줄로 출력 (키·토큰 없음)")
+    im = sub.add_parser("import-state", help="기기 이사용: export 한 줄을 붙여넣어 상태 가져오기")
+    im.add_argument("text", nargs="?", help="TBSTATE:... (생략하면 붙여넣기 입력)")
     st = sub.add_parser("stocks", help="1주 가격이 싼 코스피 대형주 찾기 (소액용)")
     st.add_argument("--max-price", type=float, default=30000, help="1주 최대 가격 (기본 3만원)")
     st.add_argument("--top", type=int, default=200, help="코스피 시총 상위 몇 개 안에서 찾을지")
@@ -287,6 +290,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "accounts":
         return cmd_accounts()
+    if args.command == "export-state":
+        from .migrate import export_text
+        print(export_text(sorted(Path(".").glob("bot_state_*.json"))))
+        return 0
+    if args.command == "import-state":
+        from .migrate import import_text
+        text = args.text or input("텔레그램 /export 로 받은 TBSTATE:... 한 줄을 붙여넣고 Enter: ")
+        for name in import_text(text):
+            print(f"가져옴: {name} (기존 파일은 .bak 으로 보관)")
+        print("⚠️ 이전 기기의 봇이 꺼져 있는지 확인한 뒤 이 기기에서 봇을 시작하세요.")
+        return 0
     if args.command == "stocks":
         from .universe import cheap_large_caps
         rows = cheap_large_caps(args.max_price, args.top)

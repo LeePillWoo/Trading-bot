@@ -19,6 +19,8 @@ class Notifier:
     """알림을 보내지 않는 기본 구현 (텔레그램 미설정 시)."""
 
     enabled = False
+    # 같은 봇 토큰으로 다른 곳에서도 명령을 받고 있으면 True (텔레그램 409 Conflict)
+    conflict = False
 
     def send(self, text: str) -> None:
         log.info("[알림] %s", text)
@@ -54,7 +56,13 @@ class TelegramNotifier(Notifier):
             params["offset"] = self._offset
         try:
             resp = self.session.get(f"{self.base}/getUpdates", params=params, timeout=timeout + 10)
+            if getattr(resp, "status_code", 200) == 409:
+                # 다른 기기에서 같은 봇이 동시에 실행 중 (텔레그램이 동시 수신을 거부)
+                self.conflict = True
+                time.sleep(min(timeout, 5))
+                return []
             updates = resp.json().get("result", [])
+            self.conflict = False
         except (requests.RequestException, ValueError) as e:
             log.warning("텔레그램 수신 실패 (%s)", type(e).__name__)
             time.sleep(min(timeout, 5))

@@ -3,7 +3,7 @@
 **나무증권(NH투자증권) Open API(NHPLUG)** 기반 국내주식 자동매매 봇입니다. 한국투자증권(KIS) API도 `--api kis`로 쓸 수 있습니다.
 전략 백테스트 → 로컬 가상매매 → 모의투자 → 실전 순서로 단계적으로 검증할 수 있도록 구성되어 있습니다.
 
-**👉 설치: 내 휴대폰에서 실행 → [TERMUX.md](TERMUX.md) · 클라우드 서버에서 실행 → [SETUP.md](SETUP.md)**
+**👉 설치: 내 휴대폰에서 실행 → [TERMUX.md](TERMUX.md) · 윈도우 컴퓨터 → [WINDOWS.md](WINDOWS.md) · 클라우드 서버 → [SETUP.md](SETUP.md)**
 
 구조: 국내 클라우드 서버에서 봇이 24시간 실행되고, 휴대폰은 텔레그램으로 알림을 받고 `/status` `/stop` `/start`로 제어합니다.
 
