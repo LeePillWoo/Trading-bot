@@ -567,9 +567,10 @@ class TradingBot:
         today = pd.Timestamp(now.date())
         strategy = sleeve.strategy
         if getattr(strategy, "portfolio", False):
-            month = now.strftime("%Y-%m")
+            month = strategy.period_key(today)
+            unit = strategy.period_label
             if self.state.portfolio_month.get(sleeve.name) == month:
-                return f"📅 {b(f'{sleeve.tag}이번 달 리밸런싱 완료')} (다음: 다음 달 첫 거래일)"
+                return f"📅 {b(f'{sleeve.tag}이번 {unit} 리밸런싱 완료')} (다음: 다음 {unit} 첫 거래일)"
             universe_note = self.refresh_universe(sleeve) if sleeve.universe_top else ""
             targets, trading_day, note = self.portfolio_targets(sleeve, today)
             if targets and not trading_day:
@@ -589,7 +590,8 @@ class TradingBot:
             self.state.portfolio_month[sleeve.name] = month
             self.state.save()
             held = [esc(self.label_of(s)) for s, t in targets.items() if t] or ["없음 (전부 현금)"]
-            return (f"📅 {b(f'{sleeve.tag}{month} 월간 리밸런싱 완료')}\n보유: {', '.join(held)}\n"
+            title = f"{month} {'주간' if unit == '주' else '월간'} 리밸런싱 완료"
+            return (f"📅 {b(f'{sleeve.tag}{title}')}\n보유: {', '.join(held)}\n"
                     + (f"{universe_note}\n" if universe_note else "")
                     + f"{i(f'최근 {strategy.lookback}거래일 수익률')}\n{note}")
         self.flow_notes = {}

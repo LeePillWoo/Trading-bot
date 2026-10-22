@@ -178,7 +178,7 @@ def _run_intraday(data, strategy, cash, risk, commission, sell_tax) -> BacktestR
 
 
 def _run_portfolio(data, strategy, cash, commission, sell_tax) -> BacktestResult:
-    """듀얼 모멘텀: 달이 바뀐 첫 거래일 시가에 리밸런싱 (선택은 전날 종가까지의 데이터로)."""
+    """듀얼 모멘텀/로테이션: 달(주)이 바뀐 첫 거래일 시가에 리밸런싱 (선택은 전날 종가까지의 데이터로)."""
     closes = pd.DataFrame({s: df["close"] for s, df in data.items()}).sort_index()
     opens = pd.DataFrame({s: df["open"] for s, df in data.items()}).reindex(closes.index)
     dates = closes.index
@@ -187,7 +187,7 @@ def _run_portfolio(data, strategy, cash, commission, sell_tax) -> BacktestResult
     equity_curve = []
     last_close: dict[str, float] = {}
     for i, date in enumerate(dates):
-        if i > 0 and date.month != dates[i - 1].month:
+        if i > 0 and strategy.period_key(date) != strategy.period_key(dates[i - 1]):
             hist = closes.iloc[:i]
             selected = strategy.select({s: hist[s].dropna() for s in hist.columns})
             # 빠지는 종목 매도

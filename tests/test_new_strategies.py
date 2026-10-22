@@ -119,3 +119,24 @@ def test_slippage_reduces_returns():
     base = run_backtest(data, strat).equity.iloc[-1]
     slipped = run_backtest(data, strat, slippage=0.001).equity.iloc[-1]
     assert slipped < base
+
+
+def test_rotation_rebalances_weekly_in_backtest():
+    import numpy as np
+    from trading_bot.backtest import run_backtest
+    from trading_bot.config import RiskConfig
+    from trading_bot.strategy import make_strategy
+
+    idx = pd.bdate_range("2025-01-01", periods=200)
+    rng = np.random.default_rng(1)
+    data = {}
+    for k, s in enumerate("ABCD"):
+        c = pd.Series(100 * np.exp(np.cumsum(rng.normal(0.001 * k, 0.02, len(idx)))), index=idx)
+        data[s] = pd.DataFrame({"open": c, "high": c, "low": c, "close": c, "volume": 1.0})
+    rot = make_strategy("rotation", lookback=20, top_n=1, rf=0.0)
+    monthly = make_strategy("dual_momentum", lookback=20, top_n=1, rf=0.0)
+    r1 = run_backtest(data, rot, cash=1_000_000, risk=RiskConfig(stop_loss_pct=0))
+    r2 = run_backtest(data, monthly, cash=1_000_000, risk=RiskConfig(stop_loss_pct=0))
+    assert len(r1.trades) > len(r2.trades) > 0
+    assert rot.period_key(pd.Timestamp("2026-10-22")) == "2026-W43"
+    assert monthly.period_key(pd.Timestamp("2026-10-22")) == "2026-10"

@@ -176,10 +176,22 @@ class DualMomentumStrategy(Strategy):
 
     name = "dual_momentum"
     portfolio = True
+    every = "month"  # 리밸런싱 주기: month | week
 
     def __init__(self, lookback: int = 252, top_n: int = 2, rf: float = 0.03):
         self.lookback, self.top_n, self.rf = lookback, top_n, rf
         self.warmup = lookback + 1
+
+    def period_key(self, ts) -> str:
+        """리밸런싱 주기 구분 키. 키가 바뀐 첫 거래일에 리밸런싱한다."""
+        if self.every == "week":
+            y, w, _ = ts.isocalendar()
+            return f"{y}-W{w:02d}"
+        return f"{ts.year}-{ts.month:02d}"
+
+    @property
+    def period_label(self) -> str:
+        return {"week": "주", "month": "달"}[self.every]
 
     @property
     def weight(self) -> float:
@@ -199,8 +211,22 @@ class DualMomentumStrategy(Strategy):
         raise NotImplementedError("dual_momentum 은 종목 묶음 단위 전략입니다 (select 사용)")
 
 
+class RotationStrategy(DualMomentumStrategy):
+    """주간 모멘텀 로테이션: 매주 첫 거래일, 최근 lookback(기본 60) 거래일 수익률 상위 top_n 종목을 보유.
+
+    듀얼 모멘텀과 같은 규칙을 더 짧은 주기·기간으로 돌린다. 후보가 많을수록(10~20개) 주마다 교체가 생긴다.
+    상위 종목도 수익률이 rf 이하이면 그 몫은 현금 → 시장 전체가 빠질 때는 알아서 현금으로 피한다.
+    """
+
+    name = "rotation"
+    every = "week"
+
+    def __init__(self, lookback: int = 60, top_n: int = 2, rf: float = 0.03):
+        super().__init__(lookback, top_n, rf)
+
+
 STRATEGIES = {cls.name: cls for cls in (SmaFlowStrategy, SmaCrossStrategy, RsiStrategy, BreakoutStrategy,
-                                        VolatilityBreakoutStrategy, DualMomentumStrategy)}
+                                        VolatilityBreakoutStrategy, DualMomentumStrategy, RotationStrategy)}
 
 
 def make_strategy(name: str, **params) -> Strategy:

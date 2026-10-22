@@ -79,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--api", choices=APIS, default="namuh",
                         help="증권사 API: namuh(나무증권/NH투자증권, 기본) | kis(한국투자증권)")
         sp.add_argument("--strategy", default="sma_flow", choices=sorted(STRATEGIES),
-                        help="sma_flow(이동평균+수급, 기본) | sma | rsi | breakout")
+                        help="sma_flow(이동평균+수급, 기본) | sma | rsi | breakout | dual_momentum(월간) | rotation(주간)")
         sp.add_argument("--param", nargs="*", default=[], metavar="KEY=VALUE",
                         help="전략 파라미터 (예: short=5 long=20)")
         sp.add_argument("--symbols", nargs="+", default=["005930"])
@@ -108,6 +108,9 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("stocks", help="1주 가격이 싼 코스피 대형주 찾기 (소액용)")
     st.add_argument("--max-price", type=float, default=30000, help="1주 최대 가격 (기본 3만원)")
     st.add_argument("--top", type=int, default=200, help="코스피 시총 상위 몇 개 안에서 찾을지")
+    st.add_argument("--limit", type=int, default=15, help="최대 몇 종목까지 보여줄지 (기본 15)")
+    st.add_argument("--codes", action="store_true",
+                    help="종목코드만 한 줄로 출력 (--symbols $(...) 에 바로 쓰기용)")
     sub.add_parser("telegram-setup", help="텔레그램 봇 연결 확인 및 chat_id 찾기")
 
     acc = sub.add_parser("accounts", help="나무증권 계좌 목록과 사용 가능 환경 확인")
@@ -279,7 +282,7 @@ def cmd_backtest(args, strategy, risk, cfg) -> int:
             rows.append((name, run(strat)))
         first = rows[0][1]
         print(f"기간 {first['기간']} · 종목 {', '.join(data)}\n")
-        labels = {"dual_momentum": "dual_mom"}
+        labels = {"dual_momentum": "dual_mom", "rotation": "rotation(주)"}
         print(f"{'전략':<9}{'수익률':>8}{'MDD':>8}{'거래':>6}{'승률':>6}")
         for name, st in rows:
             print(f"{labels.get(name, name):<10}{st['총수익률']:>9.1%}{st['최대낙폭(MDD)']:>8.1%}"
@@ -317,7 +320,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "stocks":
         from .universe import cheap_large_caps
-        rows = cheap_large_caps(args.max_price, args.top)
+        rows = cheap_large_caps(args.max_price, args.top, limit=args.limit)
+        if args.codes:
+            print(" ".join(x.code for x in rows))
+            return 0
         print(f"코스피 시총 상위 {args.top} 중 1주 {args.max_price:,.0f}원 이하 (시총 순, 전일 종가 기준)\n")
         for i, x in enumerate(rows, 1):
             print(f"{i:>2}. {x.code} {x.name}  {x.prev_close:,.0f}원  시총 {x.cap / 10000:,.1f}조")

@@ -288,3 +288,26 @@ def test_partial_sell_keeps_remainder_in_ledger(tmp_path):
     assert bot.state.holdings[""]["A"]["qty"] == 4997
     assert broker.positions["A"].qty == 4997
     assert any("3주만 매도 접수" in m for m in rec.messages)
+
+
+def test_rotation_rebalances_once_per_week(tmp_path):
+    from trading_bot.strategy import make_strategy
+
+    def trend(slope):
+        idx = pd.bdate_range("2026-08-01", "2026-10-30")
+        c = pd.Series([100.0 + slope * k for k in range(len(idx))], index=idx)
+        return pd.DataFrame({"open": c, "high": c, "low": c, "close": c, "volume": 1.0})
+
+    broker = PaperBroker(cash=1_000_000, prices={"A": trend(1.0), "B": trend(-0.5)}, commission=0, sell_tax=0)
+    cfg = BotConfig(symbols=["A", "B"], risk=RiskConfig(stop_loss_pct=0, max_daily_loss_pct=0), commission=0)
+    rec = Recorder()
+    bot = TradingBot(broker, make_strategy("rotation", lookback=20, top_n=1), cfg,
+                     state_path=tmp_path / "s.json", notifier=rec)
+    bot.step(datetime(2026, 10, 19, 9, 10, tzinfo=KST))  # 월요일
+    assert set(broker.positions) == {"A"} and bot.state.portfolio_month == {"": "2026-W43"}
+    assert "주간 리밸런싱 완료" in rec.messages[-1]
+    bot.step(datetime(2026, 10, 20, 9, 10, tzinfo=KST))  # 같은 주 화요일: 매매 없음
+    assert "이번 주 리밸런싱 완료" in rec.messages[-1]
+    bot.step(datetime(2026, 10, 26, 9, 10, tzinfo=KST))  # 다음 주 월요일: 다시 리밸런싱
+    assert bot.state.portfolio_month == {"": "2026-W44"}
+    assert "2026-W44 주간 리밸런싱 완료" in rec.messages[-1]
