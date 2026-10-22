@@ -86,3 +86,18 @@ def test_ignores_other_holdings(tmp_path):
     broker.buy("Z", 10)
     bot.step(MONDAY_0910)
     assert broker.positions["Z"].qty == 10
+
+
+def test_report_shows_change_vs_previous_close(tmp_path, monkeypatch):
+    from trading_bot.fmt import strip_tags
+    bot, broker = make_bot(tmp_path)
+    bot.step(MONDAY_0910)  # 100원에 매수
+    # 일봉 마지막 행을 오늘로, 그 앞(전일 종가)을 95로 두고 현재가 102
+    df = prices(102.0)
+    df.index = df.index[:-1].append(pd.DatetimeIndex([pd.Timestamp(datetime.now(KST).date())]))
+    df.iloc[-2, df.columns.get_loc("close")] = 95.0
+    broker.prices["A"] = df
+    bot._prev_closes.clear()  # 09:05 보고 때 캐시된 값 비움
+    text = strip_tags(bot.holding_lines(bot.sleeves[0], broker.account())[0])
+    assert "전일 대비 🔺 +35,000원 (+7.37%)" in text  # (102-95) × 5000주
+    assert "+10,000원 (+2.00%)" in text  # 매수가 대비는 그대로

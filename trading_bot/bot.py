@@ -177,6 +177,7 @@ class TradingBot:
         self.notifier = notifier or Notifier()
         self.label = label
         self._last_errors: dict[str, float] = {}
+        self._prev_closes: dict[str, tuple] = {}  # 종목 -> (날짜, 전일 종가) 하루 캐시
         self.flow_notes: dict[str, str] = {}
         if scalp_cfg and scalp_cfg.budget_pct > 0:
             from .scalp import ScalpManager
@@ -267,6 +268,22 @@ class TradingBot:
         pos = acc.positions.get(symbol)
         return pos.current_price if pos else self.broker.current_price(symbol)
 
+    def prev_close(self, symbol: str) -> float | None:
+        """전일 종가 (보고의 '전일 대비' 용). 일봉 마지막 행이 오늘이면 그 앞 행. 조회 실패 시 None."""
+        today = datetime.now(KST).date()
+        cached = self._prev_closes.get(symbol)
+        if cached and cached[0] == today:
+            return cached[1]
+        try:
+            df = self.broker.daily_ohlcv(symbol, 3)
+            closes = df.loc[df.index.date < today, "close"] if len(df) else df
+            prev = float(closes.iloc[-1]) if len(closes) else None
+        except Exception as e:
+            log.warning("%s 전일 종가 조회 실패: %s", symbol, e)
+            return None
+        self._prev_closes[symbol] = (today, prev)
+        return prev
+
     def bot_pnl(self, acc: Account) -> tuple[float, float, float]:
         """(오늘 봇 손익, 오늘 실현, 보유 평가손익(매수가 대비)). 입출금·직접 매매는 포함되지 않는다."""
         today_unrealized = held_unrealized = 0.0
@@ -310,9 +327,14 @@ class TradingBot:
             cost, value = h["price"] * qty, cur * qty
             diff = value - cost
             r = diff / cost if cost else 0.0
+            prev = self.prev_close(sym)
+            day = ""
+            if prev:
+                d = (cur - prev) * qty
+                day = f"\n  전일 대비 {arrow(d)} {d:+,.0f}원 ({pct(cur / prev - 1)})"
             lines.append(f"{b(self.label_of(sym))} {qty}주 {arrow(diff)} {b(f'{diff:+,.0f}원')} ({pct(r)})\n"
                          f"  매수 {h['price']:,.0f} × {qty} = {won(cost)}\n"
-                         f"  현재 {cur:,.0f} × {qty} = {won(value)}")
+                         f"  현재 {cur:,.0f} × {qty} = {won(value)}{day}")
         return lines
 
     def _totals(self, sleeve: Sleeve, acc: Account) -> tuple[float, float]:
