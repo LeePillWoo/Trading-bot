@@ -178,9 +178,11 @@ class DualMomentumStrategy(Strategy):
     portfolio = True
     every = "month"  # 리밸런싱 주기: month | week
 
-    def __init__(self, lookback: int = 252, top_n: int = 2, rf: float = 0.03):
+    def __init__(self, lookback: int = 252, top_n: int = 2, rf: float = 0.03, market_ma: int = 0):
         self.lookback, self.top_n, self.rf = lookback, top_n, rf
-        self.warmup = lookback + 1
+        # 시장 필터: 후보 중 market_ma 일 이동평균 위에 있는 종목이 절반 미만이면 하락장으로 보고 전부 현금 (0 이면 끔)
+        self.market_ma = market_ma
+        self.warmup = max(lookback, market_ma) + 1
 
     def period_key(self, ts) -> str:
         """리밸런싱 주기 구분 키. 키가 바뀐 첫 거래일에 리밸런싱한다."""
@@ -201,7 +203,17 @@ class DualMomentumStrategy(Strategy):
         return {s: float(c.iloc[-1] / c.iloc[-1 - self.lookback] - 1)
                 for s, c in closes.items() if len(c) > self.lookback}
 
+    def market_ok(self, closes: dict[str, pd.Series]) -> bool:
+        """후보 종목의 절반 이상이 market_ma 일 이동평균 위에 있으면 상승장(매수 허용)."""
+        if not self.market_ma:
+            return True
+        above = [float(c.iloc[-1]) > float(c.iloc[-self.market_ma:].mean())
+                 for c in closes.values() if len(c) >= self.market_ma]
+        return not above or sum(above) * 2 >= len(above)
+
     def select(self, closes: dict[str, pd.Series]) -> list[str]:
+        if not self.market_ok(closes):
+            return []
         hurdle = (1 + self.rf) ** (self.lookback / 252) - 1
         mom = self.momentum(closes)
         ranked = sorted(mom, key=mom.get, reverse=True)[:self.top_n]
@@ -221,8 +233,8 @@ class RotationStrategy(DualMomentumStrategy):
     name = "rotation"
     every = "week"
 
-    def __init__(self, lookback: int = 60, top_n: int = 2, rf: float = 0.03):
-        super().__init__(lookback, top_n, rf)
+    def __init__(self, lookback: int = 60, top_n: int = 2, rf: float = 0.03, market_ma: int = 0):
+        super().__init__(lookback, top_n, rf, market_ma)
 
 
 STRATEGIES = {cls.name: cls for cls in (SmaFlowStrategy, SmaCrossStrategy, RsiStrategy, BreakoutStrategy,

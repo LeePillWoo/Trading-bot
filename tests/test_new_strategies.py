@@ -140,3 +140,15 @@ def test_rotation_rebalances_weekly_in_backtest():
     assert len(r1.trades) > len(r2.trades) > 0
     assert rot.period_key(pd.Timestamp("2026-10-22")) == "2026-W43"
     assert monthly.period_key(pd.Timestamp("2026-10-22")) == "2026-10"
+
+
+def test_market_filter_goes_to_cash_when_most_candidates_fall():
+    from trading_bot.strategy import make_strategy
+    idx = pd.bdate_range("2026-01-01", periods=80)
+    up = pd.Series([100.0 + k for k in range(80)], index=idx)
+    down = pd.Series([200.0 - k for k in range(80)], index=idx)
+    rot = make_strategy("rotation", lookback=20, top_n=1, rf=0.0, market_ma=40)
+    assert rot.warmup == 41
+    assert rot.select({"A": up, "B": down, "C": down}) == []  # 3개 중 1개만 이평 위 → 현금
+    assert rot.select({"A": up, "B": up, "C": down}) == ["A"]
+    assert make_strategy("rotation", lookback=20, top_n=1, rf=0.0).select({"A": up, "B": down, "C": down}) == ["A"]
