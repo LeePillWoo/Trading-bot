@@ -438,6 +438,9 @@ class TradingBot:
         price = self.broker.current_price(symbol)
         qty = position_size(equity, cash, price, replace(self.cfg.risk, max_position_pct=weight),
                             self.cfg.commission)
+        one = price * (1 + self.cfg.commission)
+        if qty <= 0 and self.cfg.risk.max_single_pct and one <= min(cash, equity * self.cfg.risk.max_single_pct):
+            qty = 1  # 몫(비중)보다 비싼 종목도 1주는 담는다 (총자산 대비 max_single_pct 이하일 때만)
         if qty <= 0:
             log.info("매수 건너뜀 %s: 주문 가능 수량 0 (현금 %.0f, 가격 %.0f)", symbol, cash, price)
             return False

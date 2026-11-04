@@ -101,3 +101,20 @@ def test_report_shows_change_vs_previous_close(tmp_path, monkeypatch):
     text = strip_tags(bot.holding_lines(bot.sleeves[0], broker.account())[0])
     assert "전일 대비 🔺 +35,000원 (+7.37%)" in text  # (102-95) × 5000주
     assert "+10,000원 (+2.00%)" in text  # 매수가 대비는 그대로
+
+
+def test_max_single_buys_one_expensive_share(tmp_path):
+    # 총자산 100만, 종목 몫 10% = 10만 → 1주 15만원짜리는 원래 못 삼
+    broker = PaperBroker(cash=1_000_000, prices={"A": prices(150_000.0)}, commission=0, sell_tax=0)
+    cfg = BotConfig(symbols=["A"], risk=RiskConfig(max_position_pct=0.1), commission=0)
+    bot = TradingBot(broker, FixedSignal(1), cfg, state_path=tmp_path / "s.json")
+    bot.step(MONDAY_0910)
+    assert broker.positions == {}
+    cfg2 = BotConfig(symbols=["A"], risk=RiskConfig(max_position_pct=0.1, max_single_pct=0.2), commission=0)
+    bot2 = TradingBot(broker, FixedSignal(1), cfg2, state_path=tmp_path / "s2.json")
+    bot2.step(MONDAY_0910)
+    assert broker.positions["A"].qty == 1  # 15만 ≤ 100만 × 20%
+    cfg3 = BotConfig(symbols=["A"], risk=RiskConfig(max_position_pct=0.1, max_single_pct=0.1), commission=0)
+    broker3 = PaperBroker(cash=1_000_000, prices={"A": prices(150_000.0)}, commission=0, sell_tax=0)
+    TradingBot(broker3, FixedSignal(1), cfg3, state_path=tmp_path / "s3.json").step(MONDAY_0910)
+    assert broker3.positions == {}  # 15만 > 100만 × 10% → 안 삼

@@ -86,6 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--max-position", type=float, default=0.2, help="종목당 최대 비중")
         sp.add_argument("--stop-loss", type=float, default=0.07, help="손절 비율 (0이면 미사용)")
         sp.add_argument("--take-profit", type=float, default=0.0, help="익절 비율 (0이면 미사용)")
+        sp.add_argument("--max-single", type=float, default=0.0,
+                        help="소액용: 몫으로 1주도 못 살 때 1주 가격이 총자산의 이 비율 이하면 1주 매수 (예 0.35, 0이면 끔)")
         sp.add_argument("--max-daily-loss", type=float, default=0.03,
                         help="하루 손실 한도, 도달하면 일시정지 (0이면 미사용)")
         sp.add_argument("--cash", type=float, default=10_000_000, help="초기 자금 (백테스트/가상매매)")
@@ -359,7 +361,8 @@ def main(argv: list[str] | None = None) -> int:
 
     strategy = make_strategy(args.strategy, **parse_params(args.param))
     risk = RiskConfig(max_position_pct=args.max_position, stop_loss_pct=args.stop_loss,
-                      take_profit_pct=args.take_profit, max_daily_loss_pct=args.max_daily_loss)
+                      take_profit_pct=args.take_profit, max_daily_loss_pct=args.max_daily_loss,
+                      max_single_pct=args.max_single)
     cfg = BotConfig(symbols=args.symbols, strategy=args.strategy, risk=risk, sell_tax=args.sell_tax)
 
     if args.command == "backtest":

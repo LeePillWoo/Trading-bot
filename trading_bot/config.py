@@ -103,6 +103,8 @@ class RiskConfig:
     max_orders_per_day: int = 20
     # 하루 손실 한도 (장 시작 시 총자산 대비, 도달하면 일시정지. 0 이면 사용 안 함)
     max_daily_loss_pct: float = 0.03
+    # 소액 계좌용: 종목 몫으로 1주도 못 살 때, 1주 가격이 총자산의 이 비율 이하이고 현금이 있으면 1주는 산다 (0 이면 끔)
+    max_single_pct: float = 0.0
 
 
 @dataclass

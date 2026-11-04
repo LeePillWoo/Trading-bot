@@ -73,8 +73,11 @@ def market_report(broker, symbols: list[str], strategy, names: dict[str, str]) -
     if w2:
         lines.append(f"후보 평균 2주 수익률 {sum(w2) / len(w2):+.1%} · 오른 종목 {sum(x > 0 for x in w2)}/{len(w2)}")
     need = (len(rows) + 1) // 2
-    lines.append(f"시장 필터: {ma}일선 위 {len(above)}/{len(rows)}종목 (필요 {need}) → "
-                 + ("통과 (매수 가능)" if len(above) * 2 >= len(rows) else "미통과 (전부 현금)"))
+    if getattr(strategy, "market_ma", 0):
+        lines.append(f"시장 필터: {ma}일선 위 {len(above)}/{len(rows)}종목 (필요 {need}) → "
+                     + ("통과 (매수 가능)" if len(above) * 2 >= len(rows) else "미통과 (전부 현금)"))
+    else:
+        lines.append(f"시장 필터: 꺼짐 (참고: {ma}일선 위 {len(above)}/{len(rows)}종목)")
     if hasattr(strategy, "select") and closes:
         picked = strategy.select(closes)
         lines.append("지금 판단하면 살 종목: " + (", ".join(label(s) for s in picked) if picked else "없음"))

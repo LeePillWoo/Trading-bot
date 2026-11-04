@@ -24,3 +24,9 @@ def test_market_report_explains_filter():
     prices["B"] = series(0.2)
     text = market_report(PaperBroker(prices=prices), ["A", "B", "C"], strat, {})
     assert "통과 (매수 가능)" in text and "살 종목: A(A), B(B)" in text
+
+
+def test_market_report_filter_off():
+    prices = {"069500": series(0.5), "A": series(1.0), "B": series(-0.3), "C": series(-0.5)}
+    text = market_report(PaperBroker(prices=prices), ["A", "B", "C"], make_strategy("rotation", top_n=5), {})
+    assert "시장 필터: 꺼짐" in text and "살 종목: A(A)" in text
