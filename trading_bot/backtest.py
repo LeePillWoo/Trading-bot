@@ -73,7 +73,7 @@ def run_backtest(data: dict[str, pd.DataFrame], strategy: Strategy, cash: float 
     if getattr(strategy, "intraday", False):
         return _run_intraday(data, strategy, cash, risk, commission, sell_tax)
     if getattr(strategy, "portfolio", False):
-        return _run_portfolio(data, strategy, cash, commission, sell_tax)
+        return _run_portfolio(data, strategy, cash, commission, sell_tax, risk.stop_loss_pct)
     return _run_daily(data, strategy, cash, risk, commission, sell_tax)
 
 
@@ -177,19 +177,27 @@ def _run_intraday(data, strategy, cash, risk, commission, sell_tax) -> BacktestR
     return BacktestResult(equity=equity, trades=trades, benchmark=_benchmark(data, equity.index, equity.iloc[0]))
 
 
-def _run_portfolio(data, strategy, cash, commission, sell_tax) -> BacktestResult:
-    """듀얼 모멘텀/로테이션: 달(주)이 바뀐 첫 거래일 시가에 리밸런싱 (선택은 전날 종가까지의 데이터로)."""
+def _run_portfolio(data, strategy, cash, commission, sell_tax, stop_loss: float = 0.0) -> BacktestResult:
+    """듀얼 모멘텀/로테이션: 달(주)이 바뀐 첫 거래일 시가에 리밸런싱 (선택은 전날 종가까지의 데이터로).
+
+    stop_loss > 0 이면 실매매처럼 장중 손절: 매수가 × (1 - stop_loss) 에 닿으면 그 가격에 매도
+    (시가가 이미 그 아래면 시가에 매도). 손절한 종목은 리밸런싱에서 한 번 빠질 때까지 다시 사지 않는다.
+    """
     closes = pd.DataFrame({s: df["close"] for s, df in data.items()}).sort_index()
     opens = pd.DataFrame({s: df["open"] for s, df in data.items()}).reindex(closes.index)
+    lows = pd.DataFrame({s: df["low"] for s, df in data.items()}).reindex(closes.index)
     dates = closes.index
     positions: dict[str, Trade] = {}
     trades: list[Trade] = []
     equity_curve = []
     last_close: dict[str, float] = {}
+    blocked: set[str] = set()
     for i, date in enumerate(dates):
         if i > 0 and strategy.period_key(date) != strategy.period_key(dates[i - 1]):
             hist = closes.iloc[:i]
             selected = strategy.select({s: hist[s].dropna() for s in hist.columns})
+            blocked &= set(selected)  # 선택에서 빠진 종목은 재진입 금지 해제
+            selected = [s for s in selected if s not in blocked]
             # 빠지는 종목 매도
             for sym in [s for s in positions if s not in selected]:
                 price = opens.at[date, sym]
@@ -211,6 +219,17 @@ def _run_portfolio(data, strategy, cash, commission, sell_tax) -> BacktestResult
                     t = Trade(sym, date, float(price), qty)
                     positions[sym] = t
                     trades.append(t)
+        if stop_loss:
+            for sym in list(positions):
+                t, o, lo = positions[sym], opens.at[date, sym], lows.at[date, sym]
+                trigger = t.entry_price * (1 - stop_loss)
+                if pd.isna(lo) or lo > trigger:
+                    continue
+                price = float(o) if pd.notna(o) and o <= trigger else trigger
+                positions.pop(sym)
+                cash += price * t.qty * (1 - commission - sell_tax)
+                t.exit_date, t.exit_price, t.reason = date, price, "손절"
+                blocked.add(sym)
         for sym in closes.columns:
             if pd.notna(closes.at[date, sym]):
                 last_close[sym] = float(closes.at[date, sym])

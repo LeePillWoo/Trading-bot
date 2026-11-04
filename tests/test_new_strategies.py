@@ -152,3 +152,24 @@ def test_market_filter_goes_to_cash_when_most_candidates_fall():
     assert rot.select({"A": up, "B": down, "C": down}) == []  # 3개 중 1개만 이평 위 → 현금
     assert rot.select({"A": up, "B": up, "C": down}) == ["A"]
     assert make_strategy("rotation", lookback=20, top_n=1, rf=0.0).select({"A": up, "B": down, "C": down}) == ["A"]
+
+
+def test_portfolio_backtest_stop_loss():
+    from trading_bot.backtest import run_backtest
+    from trading_bot.config import RiskConfig
+    from trading_bot.strategy import make_strategy
+
+    idx = pd.bdate_range("2026-01-05", periods=60)
+    a = pd.Series([100.0 + k for k in range(60)], index=idx)
+    b = pd.Series(50.0, index=idx)
+    crash = idx.get_loc(pd.Timestamp("2026-03-11"))  # 수요일
+    a.iloc[crash:] = a.iloc[crash - 1] * 0.5  # -50% 급락 후 유지 (매수가 대비 약 -37%)
+    data = {s: pd.DataFrame({"open": c, "high": c, "low": c, "close": c, "volume": 1.0})
+            for s, c in {"A": a, "B": b}.items()}
+    strat = make_strategy("rotation", lookback=10, top_n=1, rf=0.0)
+    no_stop = run_backtest(data, strat, cash=1_000_000, risk=RiskConfig(stop_loss_pct=0), commission=0, sell_tax=0)
+    stop = run_backtest(data, strat, cash=1_000_000, risk=RiskConfig(stop_loss_pct=0.15), commission=0, sell_tax=0)
+    stopped = [t for t in stop.trades if t.reason == "손절"]
+    assert len(stopped) == 1 and stopped[0].exit_date == pd.Timestamp("2026-03-11")
+    assert stopped[0].exit_price < stopped[0].entry_price * 0.85 + 1e-9  # 갭하락이라 시가(손절가 아래)에 매도
+    assert all(t.reason != "손절" for t in no_stop.trades)
