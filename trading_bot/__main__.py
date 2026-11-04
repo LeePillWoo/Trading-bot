@@ -112,6 +112,8 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--codes", action="store_true",
                     help="종목코드만 한 줄로 출력 (--symbols $(...) 에 바로 쓰기용)")
     sub.add_parser("telegram-setup", help="텔레그램 봇 연결 확인 및 chat_id 찾기")
+    mk = sub.add_parser("market", help="시장 점검: 후보 종목 최근 흐름과 봇이 지금 살지/안 살지 (조회만)")
+    mk.add_argument("--symbols", nargs="+", help="생략하면 .env 의 BOT_ARGS 종목")
 
     acc = sub.add_parser("accounts", help="나무증권 계좌 목록과 사용 가능 환경 확인")
     acc.set_defaults(api="namuh")
@@ -191,6 +193,23 @@ def cmd_telegram_setup() -> int:
     print(f"\n보낸 계정: {name} (본인이 아니면 등록하지 마세요)")
     print(f"chat_id 를 찾았습니다: {chat_id}\n.env 에 TELEGRAM_CHAT_ID={chat_id} 를 넣으세요.")
     tg.send("✅ 자동매매 봇 연결 확인 완료")
+    return 0
+
+
+def cmd_market(args) -> int:
+    from .market import market_report
+    from .universe import load_master
+
+    bot_args = build_parser().parse_args(service_argv())  # .env 의 BOT_ARGS (종목·전략 파라미터)
+    symbols = args.symbols or bot_args.symbols
+    strategy = make_strategy(bot_args.strategy, **parse_params(bot_args.param))
+    broker, _ = make_api_broker("namuh", require_account=False)
+    try:
+        names = {x.code: x.name for x in load_master()}
+    except Exception:
+        names = {}
+    print(f"전략 {strategy.name} {' '.join(bot_args.param)}\n")
+    print(market_report(broker, symbols, strategy, names))
     return 0
 
 
@@ -335,6 +354,8 @@ def main(argv: list[str] | None = None) -> int:
         return Wizard().run()
     if args.command == "telegram-setup":
         return cmd_telegram_setup()
+    if args.command == "market":
+        return cmd_market(args)
 
     strategy = make_strategy(args.strategy, **parse_params(args.param))
     risk = RiskConfig(max_position_pct=args.max_position, stop_loss_pct=args.stop_loss,
