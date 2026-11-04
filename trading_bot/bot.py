@@ -463,7 +463,9 @@ class TradingBot:
         targets, trading_day = {}, False
         for sym in sleeve.symbols:
             try:
-                df = self.broker.daily_ohlcv(sym, days=strategy.warmup + 60)
+                # RSI·돌파처럼 '진입 후 청산 신호까지 보유'하는 전략은 진입 시점이 수개월 전일 수 있어
+                # 넉넉히 1년치를 받아 백테스트와 같은 상태(보유/미보유)를 재현한다
+                df = self.broker.daily_ohlcv(sym, days=strategy.warmup + 250)
             except Exception as e:
                 log.exception("%s 일봉 조회 실패", sym)
                 self.notify_error(f"{sym} 일봉 조회 실패: {e}")
