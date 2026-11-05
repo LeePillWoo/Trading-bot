@@ -215,3 +215,59 @@ def test_sell_and_buy_reasons_reach_report(tmp_path):
     assert "A" in broker.positions
     assert any("매수 주문" in m and "이유:" in m and "과매도" in m for m in rec)
     assert bot.state.trades_today[0]["reason"]
+
+
+def _oversold(steep: bool, flow: float = 0.0, n: int = 60):
+    """같은 날 하루 급락으로 둘 다 과매도(RSI<30)가 되지만, steep=True 쪽이 더 크게 빠져 RSI 가 더 낮다."""
+    idx = pd.bdate_range("2026-07-20", periods=n)
+    zigzag = [100.0 + (k % 2) for k in range(n - 1)]
+    c = pd.Series(zigzag + [zigzag[-1] - (40.0 if steep else 12.0)], index=idx)
+    return pd.DataFrame({"open": c, "high": c, "low": c, "close": c, "volume": 1.0,
+                         "foreign": flow, "institution": 0.0})
+
+
+def test_rsi_priority_orders_buys_live(tmp_path):
+    from trading_bot.bot import KST, TradingBot
+    from trading_bot.broker.paper import PaperBroker
+    from trading_bot.config import BotConfig, RiskConfig
+    from trading_bot.strategy import make_strategy
+    # B 가 더 많이 빠짐(RSI 더 낮음)
+    data = {"A": _oversold(False), "B": _oversold(True)}
+    last = data["A"].index[-1]
+    for k in data:  # 오늘 봉 추가 (거래일 판정)
+        row = data[k].iloc[[-1]].copy()
+        row.index = [last + pd.offsets.BDay(1)]
+        data[k] = pd.concat([data[k], row])
+    day = datetime(*(last + pd.offsets.BDay(1)).timetuple()[:3], 9, 10, tzinfo=KST)
+
+    def run(strategy, path):
+        broker = PaperBroker(cash=1_000_000, prices={k: v.copy() for k, v in data.items()}, commission=0, sell_tax=0)
+        bot = TradingBot(broker, strategy, BotConfig(symbols=["A", "B"], risk=RiskConfig(max_position_pct=0.6,
+                         stop_loss_pct=0)), state_path=tmp_path / path)
+        bot.notifier.send = lambda *a, **k: None
+        bot.step(day)
+        return list(broker.positions)[0]  # 먼저 산 종목
+
+    assert run(make_strategy("rsi", rank=0), "a.json") == "A"  # 목록 순서
+    assert run(make_strategy("rsi"), "b.json") == "B"  # RSI 낮은 B 먼저
+    # flow=1: A 만 외국인 순매수 → A 먼저
+    data["A"]["foreign"] = 1000.0
+    assert run(make_strategy("rsi", flow=1), "c.json") == "A"
+
+
+def test_rsi_priority_orders_buys_backtest():
+    from trading_bot.backtest import run_backtest
+    from trading_bot.config import RiskConfig
+    from trading_bot.strategy import make_strategy
+    def nxt(df):  # 신호 다음 날 시가에 체결되므로 하루를 더 붙인다
+        row = df.iloc[[-1]].copy()
+        row.index = [df.index[-1] + pd.offsets.BDay(1)]
+        return pd.concat([df, row])
+
+    data = {"A": nxt(_oversold(False)), "B": nxt(_oversold(True))}
+    risk = RiskConfig(max_position_pct=0.6, stop_loss_pct=0)
+    first = lambda st: run_backtest(data, st, cash=1_000_000, risk=risk).trades[0].symbol  # noqa: E731
+    assert first(make_strategy("rsi", rank=0)) == "A"
+    assert first(make_strategy("rsi")) == "B"
+    data["A"]["foreign"] = 1000.0
+    assert first(make_strategy("rsi", flow=1)) == "A"

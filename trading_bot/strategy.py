@@ -34,6 +34,11 @@ class Strategy:
         """보고용: 마지막 봉 기준으로 왜 보유(1)/미보유(0)인지 한 줄 설명. 모르면 빈 문자열."""
         return ""
 
+    def priority_series(self, df: pd.DataFrame) -> pd.Series:
+        """매수 우선순위 (작을수록 먼저 산다). 같은 날 매수 신호가 여럿이고 현금이 모자랄 때 쓴다.
+        기본은 모두 같음 = 후보 목록 순서."""
+        return pd.Series(0.0, index=df.index)
+
 
 def _md(ts) -> str:
     return f"{ts.month}/{ts.day}"
@@ -71,9 +76,27 @@ class RsiStrategy(Strategy):
 
     name = "rsi"
 
-    def __init__(self, period: int = 14, oversold: float = 30, overbought: float = 70):
+    def __init__(self, period: int = 14, oversold: float = 30, overbought: float = 70,
+                 rank: int = 1, flow: int = 0, flow_days: int = 5):
         self.period, self.oversold, self.overbought = period, oversold, overbought
         self.warmup = period + 1
+        # 매수 우선순위: rank=1 이면 RSI 낮은(많이 빠진) 종목부터. flow=1 이면 최근 flow_days 일
+        # 외국인+기관(연기금 포함) 순매수가 플러스인 종목을 먼저, 그 안에서 RSI 낮은 순. 매수/매도 신호 자체는 그대로.
+        self.rank, self.flow, self.flow_days = rank, flow, flow_days
+        self.needs_flow = bool(flow)
+
+    def flow_sum(self, df: pd.DataFrame) -> pd.Series:
+        if not {"foreign", "institution"} <= set(df.columns):
+            return pd.Series(float("nan"), index=df.index)
+        return (df["foreign"] + df["institution"]).rolling(self.flow_days).sum()
+
+    def priority_series(self, df: pd.DataFrame) -> pd.Series:
+        if not self.rank:
+            return super().priority_series(df)
+        score = self.rsi(df["close"], self.period).fillna(100.0)
+        if self.flow:
+            score = score + (self.flow_sum(df) > 0).map({True: 0.0, False: 100.0})
+        return score
 
     @staticmethod
     def rsi(close: pd.Series, period: int) -> pd.Series:
@@ -103,7 +126,11 @@ class RsiStrategy(Strategy):
         if target:
             low = rsi[rsi < self.oversold]
             when = f"{_md(low.index[-1])} RSI {low.iloc[-1]:.0f}로 과매도({self.oversold:g} 아래) → 반등 노림" if len(low) else ""
-            return f"{when} · 어제 RSI {now:.0f}".strip(" ·")
+            text = f"{when} · 어제 RSI {now:.0f}".strip(" ·")
+            fl = self.flow_sum(df).iloc[-1]
+            if pd.notna(fl):
+                text += f" · 외국인+기관 {self.flow_days}일 {fl:+,.0f}주{' (순매수)' if fl > 0 else ''}"
+            return text
         high = rsi[rsi > self.overbought]
         if len(high) and high.index[-1] == rsi.index[-1]:
             return f"과매수: 어제 RSI {now:.0f} ({self.overbought:g} 위) → 차익 실현"

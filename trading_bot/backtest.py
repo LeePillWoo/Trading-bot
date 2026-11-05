@@ -85,6 +85,9 @@ def _benchmark(data: dict[str, pd.DataFrame], index: pd.DatetimeIndex, start: fl
 
 def _run_daily(data, strategy, cash, risk, commission, sell_tax) -> BacktestResult:
     signals = {s: strategy.signals(df) for s, df in data.items()}
+    prio_fn = getattr(strategy, "priority_series", None)
+    prios = {s: prio_fn(df) for s, df in data.items()} if prio_fn else {}
+    prio_at: dict[str, float] = {}  # 매수 대기 종목의 우선순위 (결정한 날 기준, 작을수록 먼저)
     dates = sorted(set().union(*(df.index for df in data.values())))
 
     positions: dict[str, Trade] = {}
@@ -97,7 +100,9 @@ def _run_daily(data, strategy, cash, risk, commission, sell_tax) -> BacktestResu
     for date in dates:
         # 1) 전일 결정된 주문을 오늘 시가에 체결 (매도 먼저 처리해 현금 확보)
         prev_equity = cash + sum(t.qty * last_close.get(s, t.entry_price) for s, t in positions.items())
-        for sym, action in sorted(pending.items(), key=lambda kv: not kv[1].startswith("sell")):
+        # 매도 먼저, 매수는 우선순위 순 (같으면 후보 목록 순서)
+        order = sorted(pending.items(), key=lambda kv: (not kv[1].startswith("sell"), prio_at.get(kv[0], 0.0)))
+        for sym, action in order:
             df = data[sym]
             if date not in df.index:
                 continue
@@ -133,6 +138,8 @@ def _run_daily(data, strategy, cash, risk, commission, sell_tax) -> BacktestResu
                     pending[sym] = "sell:신호"
             elif target == 1 and sym not in blocked:
                 pending[sym] = "buy"
+                if sym in prios:
+                    prio_at[sym] = float(prios[sym].at[date])
 
         equity_curve.append(cash + sum(t.qty * last_close[s] for s, t in positions.items()))
 

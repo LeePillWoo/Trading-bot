@@ -183,6 +183,7 @@ class TradingBot:
         self._prev_closes: dict[str, tuple] = {}  # 종목 -> (날짜, 전일 종가) 하루 캐시
         self.flow_notes: dict[str, str] = {}
         self.reasons: dict[str, str] = {}  # 오늘 판단에서 종목별 매수/매도 이유 (보고용)
+        self.priority: dict[str, float] = {}  # 오늘 매수 우선순위 (작을수록 먼저)
         if scalp_cfg and scalp_cfg.budget_pct > 0:
             from .scalp import ScalpManager
             self.scalp = ScalpManager(self, scalp_cfg)
@@ -535,7 +536,7 @@ class TradingBot:
                     flow = self.broker.investor_flow(sym, days=strategy.warmup + 60)
                 except Exception as e:
                     log.exception("%s 수급 조회 실패", sym)
-                    self.notify_error(f"{sym} 수급 조회 실패 (오늘 신규 매수 안 함): {e}")
+                    self.notify_error(f"{sym} 수급 조회 실패 (수급 조건은 미충족으로 처리): {e}")
                     flow = pd.DataFrame(columns=["foreign", "institution"], dtype=float)
                 past = with_flow(past, flow)
                 self.flow_notes[sym] = flow_note(past)
@@ -546,6 +547,8 @@ class TradingBot:
                 targets[sym] = int(strategy.signals(past).iloc[-1])
                 try:
                     self.reasons[sym] = getattr(strategy, "explain", lambda *_: "")(past, targets[sym])
+                    if hasattr(strategy, "priority_series"):
+                        self.priority[sym] = float(strategy.priority_series(past).iloc[-1])
                 except Exception:
                     log.exception("%s 매매 이유 계산 실패", sym)
         return targets, trading_day
@@ -645,7 +648,8 @@ class TradingBot:
                 why = self.reasons.get(sym) or ("후보 종목에서 제외" if sym not in sleeve.symbols else "")
                 self._sell(sleeve, sym, acc, f"{reason}: {why}" if why else reason)
         acc = self.broker.account()
-        for sym, target in targets.items():
+        # 매수는 우선순위 순 (rsi: RSI 낮은 종목부터). 같으면 후보 목록 순서
+        for sym, target in sorted(targets.items(), key=lambda kv: self.priority.get(kv[0], 0.0)):
             if target == 1 and sym not in self.ledger(sleeve) and sleeve.key(sym) not in self.state.blocked:
                 equity, cash = self.budget(sleeve, acc)
                 if self._buy(sleeve, sym, equity, cash, weight, self.reasons.get(sym, "")):
@@ -701,7 +705,7 @@ class TradingBot:
         return "\n".join(lines)
 
     def rebalance(self, now: datetime) -> None:
-        self.reasons = {}
+        self.reasons, self.priority = {}, {}
         acc = self.broker.account()
         if self.bot_equity(acc) <= 0:
             # 아무것도 못 사는데 '이번 달 리밸런싱 완료'로 기록되면 자금이 들어와도 다음 달까지 대기하게 됨
