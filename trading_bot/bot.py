@@ -262,12 +262,34 @@ class TradingBot:
 
     def budget(self, sleeve: Sleeve, acc: Account) -> tuple[float, float]:
         """(슬리브 자금, 슬리브가 새로 쓸 수 있는 현금)."""
-        equity = acc.equity * sleeve.weight
+        equity = self.bot_equity(acc) * sleeve.weight
         held = sum(h["qty"] * (acc.positions[s].current_price if s in acc.positions else h["price"])
                    for s, h in self.ledger(sleeve).items())
         return equity, max(0.0, min(equity - held, acc.cash))
 
     # ---------- 봇 손익 ----------
+    def bot_equity(self, acc: Account) -> float:
+        """봇 운용 자산 = 주문 가능 현금(D+2) + 봇 장부 보유 평가액 (+ 단타 보유분).
+
+        증권사 잔고(보유 목록·순자산)는 결제(2영업일) 기준이라 오늘 사고판 종목이 빠지거나 남아 있다.
+        현금(D+2 예수금)은 주문 즉시 반영되므로, 현금 + 봇이 직접 기록한 장부로 계산해야 정확하다.
+        사용자가 직접 들고 있는 종목은 봇 자금이 아니므로 넣지 않는다.
+        """
+        value = 0.0
+        for sl in self.sleeves:
+            for sym, h in self.ledger(sl).items():
+                try:
+                    value += h["qty"] * self._price(sym, acc)
+                except Exception:
+                    value += h["qty"] * h["price"]
+        if self.scalp:
+            for sym, sp in self.state.scalp.get("positions", {}).items():
+                try:
+                    value += sp["qty"] * self._price(sym, acc)
+                except Exception:
+                    value += sp["qty"] * sp["price"]
+        return acc.cash + value
+
     def _price(self, symbol: str, acc: Account) -> float:
         pos = acc.positions.get(symbol)
         return pos.current_price if pos else self.broker.current_price(symbol)
@@ -303,11 +325,13 @@ class TradingBot:
 
     # ---------- 보고 서식 (HTML) ----------
     def account_section(self, acc: Account) -> str:
-        return f"💰 {b('계좌')}\n총자산 {b(won(acc.equity))} · 현금 {won(acc.cash)}"
+        total = self.bot_equity(acc)
+        return (f"💰 {b('계좌')} {i('(봇 운용분)')}\n총자산 {b(won(total))} · 현금 {won(acc.cash)}"
+                f" · 주식 {won(total - acc.cash)}")
 
     def pnl_section(self, acc: Account) -> str:
         today, realized, held = self.bot_pnl(acc)
-        base = self.state.start_equity or acc.equity
+        base = self.state.start_equity or self.bot_equity(acc)
         p = f" ({pct(today / base)})" if base else ""
         return (f"📈 {b('봇 손익')} {i('(입출금·직접 매매 제외)')}\n"
                 f"오늘 {arrow(today)} {b(f'{today:+,.0f}원')}{p} · 실현 {realized:+,.0f}원\n"
@@ -521,7 +545,7 @@ class TradingBot:
             else:
                 targets[sym] = int(strategy.signals(past).iloc[-1])
                 try:
-                    self.reasons[sym] = strategy.explain(past, targets[sym])
+                    self.reasons[sym] = getattr(strategy, "explain", lambda *_: "")(past, targets[sym])
                 except Exception:
                     log.exception("%s 매매 이유 계산 실패", sym)
         return targets, trading_day
@@ -530,7 +554,7 @@ class TradingBot:
         """손절/익절 (슬리브 장부의 매수가 기준), 하루 손실 한도 (봇 손익 기준, 입출금 제외)."""
         self.init_ledger(acc)
         if not self.state.start_equity:
-            self.state.start_equity = acc.equity
+            self.state.start_equity = self.bot_equity(acc)
             self.state.save()
         if self.state.refs_date != self.state.date:
             # 하루의 시작: 보유 종목의 오늘 손익 기준가를 현재가로 맞춘다
@@ -679,7 +703,7 @@ class TradingBot:
     def rebalance(self, now: datetime) -> None:
         self.reasons = {}
         acc = self.broker.account()
-        if acc.equity <= 0:
+        if self.bot_equity(acc) <= 0:
             # 아무것도 못 사는데 '이번 달 리밸런싱 완료'로 기록되면 자금이 들어와도 다음 달까지 대기하게 됨
             self.notify("⚠️ 계좌 총자산이 0원이라 오늘 매매를 건너뜁니다. "
                         "자금이 들어오면 다음 거래일 09:05에 자동으로 진행합니다.")
@@ -708,7 +732,7 @@ class TradingBot:
             acc = self.broker.account()
             today, _, held = self.bot_pnl(acc)
             n = sum(len(self.ledger(sl)) for sl in self.sleeves)
-            money = (f"💰 총자산 {b(won(acc.equity))} · 봇 보유 {n}종목\n"
+            money = (f"💰 총자산 {b(won(self.bot_equity(acc)))} · 봇 보유 {n}종목\n"
                      f"📈 오늘 {signed_won(today)} · 보유 평가 {signed_won(held)}")
         except Exception as e:
             money = f"계좌 조회 실패: {esc(e)}"

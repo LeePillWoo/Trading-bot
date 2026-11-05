@@ -135,3 +135,22 @@ def test_report_lists_todays_trades_with_realized_pnl(tmp_path):
     assert "매도 합계 🔺 +50,000원 (+5.00%)" in text
     bot.state.roll("2026-10-20")
     assert bot.state.trades_today == [] and "오늘 매매" not in strip_tags(bot.account_report(broker.account()))
+
+
+def test_equity_counts_unsettled_bot_positions(tmp_path):
+    """오늘 산 종목이 결제 전이라 잔고에 안 보여도(증권사 순자산 = 현금) 총자산·매수 예산이 맞아야 한다."""
+    from trading_bot.broker.base import Account
+
+    class Unsettled(PaperBroker):
+        def account(self):
+            acc = super().account()
+            return Account(cash=acc.cash, positions={}, total=acc.cash)  # 보유 목록 비어 있고 순자산 = 현금
+
+    broker = Unsettled(cash=1_000_000, prices={"A": prices(), "B": prices(), "C": prices()},
+                       commission=0, sell_tax=0)
+    cfg = BotConfig(symbols=["A", "B", "C"], risk=RiskConfig(max_position_pct=0.3), commission=0)
+    bot = TradingBot(broker, FixedSignal(1), cfg, state_path=tmp_path / "s.json")
+    bot.step(MONDAY_0910)
+    # 예전에는 첫 매수 뒤 총자산을 현금(70만)으로 읽어 예산이 0 → 나머지 못 삼
+    assert {s: p.qty for s, p in broker.positions.items()} == {"A": 3000, "B": 3000, "C": 3000}
+    assert bot.bot_equity(broker.account()) == 1_000_000

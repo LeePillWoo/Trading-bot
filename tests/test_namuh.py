@@ -217,8 +217,8 @@ def test_bot_trades_through_namuh(tmp_path):
     bot.step(datetime(2026, 10, 19, 9, 10, tzinfo=KST))
     buys = [c for c in b.session.calls if c[0].endswith("/cashBuy")]
     assert len(buys) == 1 and buys[0][2]["iem_cd"] == "000660"
-    # 총자산(250,000 + 3*71,000) * 50% / 71,000 = 3주
-    assert buys[0][2]["orr_qty"] == 3
+    # 봇 운용 자산 = 현금 250,000 (원래 들고 있던 005930 3주는 봇 자금이 아님) → 50% / 71,000 = 1주
+    assert buys[0][2]["orr_qty"] == 1
 
 
 def test_investor_flow(tmp_path):

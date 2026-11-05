@@ -147,9 +147,10 @@ class ScalpManager:
         acc = bot.broker.account()
         price = bot.broker.current_price(symbol)
         risk = replace(bot.cfg.risk, max_position_pct=self.cfg.budget_pct)
-        qty = position_size(acc.equity, acc.cash, price, risk, bot.cfg.commission)
+        equity = bot.bot_equity(acc)
+        qty = position_size(equity, acc.cash, price, risk, bot.cfg.commission)
         if qty <= 0:
-            bot.notify(f"⚡ {esc(self._label(symbol))}: 예산({won(acc.equity * self.cfg.budget_pct)})으로 1주도 살 수 없어 건너뜁니다.", html=True)
+            bot.notify(f"⚡ {esc(self._label(symbol))}: 예산({won(equity * self.cfg.budget_pct)})으로 1주도 살 수 없어 건너뜁니다.", html=True)
             return False
         res = bot.broker.buy(symbol, qty)
         bot.state.orders += 1
@@ -214,7 +215,7 @@ class ScalpManager:
 
     def _equity_guess(self) -> float:
         try:
-            return self.bot.broker.account().equity
+            return self.bot.bot_equity(self.bot.broker.account())
         except Exception:
             return 0.0
 
