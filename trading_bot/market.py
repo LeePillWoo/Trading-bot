@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 
 BENCHMARK = ("069500", "KODEX 200 (코스피200)")
@@ -31,7 +33,7 @@ def _row(df: pd.DataFrame, ma: int, lookback: int) -> dict | None:
 def market_report(broker, symbols: list[str], strategy, names: dict[str, str]) -> str:
     ma = getattr(strategy, "market_ma", 0) or 60
     lookback = getattr(strategy, "lookback", 60)
-    days = max(ma, lookback) + 15
+    days = max(ma, lookback, getattr(strategy, "warmup", 0) + 250) + 15
     label = lambda s: f"{names.get(s, s)}({s})"  # noqa: E731
     lines = []
 
@@ -46,7 +48,7 @@ def market_report(broker, symbols: list[str], strategy, names: dict[str, str]) -
     else:
         lines += [f"[시장] 조회 실패: {err}", ""]
 
-    rows, closes = [], {}
+    rows, closes, frames = [], {}, {}
     for s in symbols:
         try:
             df = broker.daily_ohlcv(s, days)
@@ -57,6 +59,7 @@ def market_report(broker, symbols: list[str], strategy, names: dict[str, str]) -
         if r:
             rows.append((s, r))
             closes[s] = df["close"].dropna()
+            frames[s] = df
     rows.sort(key=lambda x: x[1]["mom"] if x[1]["mom"] is not None else -9, reverse=True)
 
     above = [s for s, r in rows if r["vs_ma"] is not None and r["vs_ma"] > 0]
@@ -81,4 +84,13 @@ def market_report(broker, symbols: list[str], strategy, names: dict[str, str]) -
     if hasattr(strategy, "select") and closes:
         picked = strategy.select(closes)
         lines.append("지금 판단하면 살 종목: " + (", ".join(label(s) for s in picked) if picked else "없음"))
+    elif frames:
+        # 일봉 전략(rsi 등): 종목별 보유/미보유 판단과 이유 (어제 종가까지 기준 = 오늘 09:05 판단과 같음)
+        lines += ["", f"[{strategy.name} 판단] 오늘 09:05 기준"]
+        for s, df in frames.items():
+            past = df[df.index.date < date.today()] if len(df) else df
+            if len(past) < strategy.warmup:
+                continue
+            sig = int(strategy.signals(past).iloc[-1])
+            lines.append(f"{'🟢 보유' if sig else '⚪ 미보유'} {label(s)}\n   {strategy.explain(past, sig)}")
     return "\n".join(lines)

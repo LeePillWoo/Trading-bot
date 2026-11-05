@@ -30,3 +30,9 @@ def test_market_report_filter_off():
     prices = {"069500": series(0.5), "A": series(1.0), "B": series(-0.3), "C": series(-0.5)}
     text = market_report(PaperBroker(prices=prices), ["A", "B", "C"], make_strategy("rotation", top_n=5), {})
     assert "시장 필터: 꺼짐" in text and "살 종목: A(A)" in text
+
+
+def test_market_report_daily_strategy_reasons():
+    prices = {"069500": series(0.5), "A": series(1.0)}
+    text = market_report(PaperBroker(prices=prices), ["A"], make_strategy("rsi"), {"A": "에이"})
+    assert "[rsi 판단]" in text and "에이(A)" in text and "RSI" in text
