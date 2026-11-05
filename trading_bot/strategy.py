@@ -30,6 +30,14 @@ class Strategy:
     def signals(self, df: pd.DataFrame) -> pd.Series:
         raise NotImplementedError
 
+    def explain(self, df: pd.DataFrame, target: int) -> str:
+        """보고용: 마지막 봉 기준으로 왜 보유(1)/미보유(0)인지 한 줄 설명. 모르면 빈 문자열."""
+        return ""
+
+
+def _md(ts) -> str:
+    return f"{ts.month}/{ts.day}"
+
 
 class SmaCrossStrategy(Strategy):
     """단기 이동평균이 장기 이동평균 위에 있으면 보유."""
@@ -47,6 +55,15 @@ class SmaCrossStrategy(Strategy):
         fast = close.rolling(self.short).mean()
         slow = close.rolling(self.long).mean()
         return (fast > slow).astype(int).where(slow.notna(), 0)
+
+    def explain(self, df: pd.DataFrame, target: int) -> str:
+        close = df["close"]
+        f, sl = close.rolling(self.short).mean().iloc[-1], close.rolling(self.long).mean().iloc[-1]
+        if pd.isna(sl):
+            return ""
+        rel = ">" if f > sl else "<"
+        trend = "상승 추세" if f > sl else "추세 이탈"
+        return f"{trend}: {self.short}일선 {f:,.0f} {rel} {self.long}일선 {sl:,.0f}"
 
 
 class RsiStrategy(Strategy):
@@ -78,6 +95,21 @@ class RsiStrategy(Strategy):
             pos.append(state)
         return pd.Series(pos, index=df.index, dtype=int)
 
+    def explain(self, df: pd.DataFrame, target: int) -> str:
+        rsi = self.rsi(df["close"], self.period).dropna()
+        if rsi.empty:
+            return ""
+        now = rsi.iloc[-1]
+        if target:
+            low = rsi[rsi < self.oversold]
+            when = f"{_md(low.index[-1])} RSI {low.iloc[-1]:.0f}로 과매도({self.oversold:g} 아래) → 반등 노림" if len(low) else ""
+            return f"{when} · 어제 RSI {now:.0f}".strip(" ·")
+        high = rsi[rsi > self.overbought]
+        if len(high) and high.index[-1] == rsi.index[-1]:
+            return f"과매수: 어제 RSI {now:.0f} ({self.overbought:g} 위) → 차익 실현"
+        when = f" ({_md(high.index[-1])} RSI {high.iloc[-1]:.0f} 과매수)" if len(high) else ""
+        return f"과매수 신호 후 미보유{when} · 어제 RSI {now:.0f}"
+
 
 class BreakoutStrategy(Strategy):
     """채널 돌파(터틀 방식): 종가가 N일 최고가를 돌파하면 매수, M일 최저가를 이탈하면 매도."""
@@ -99,6 +131,15 @@ class BreakoutStrategy(Strategy):
                 state = 0
             pos.append(state)
         return pd.Series(pos, index=df.index, dtype=int)
+
+    def explain(self, df: pd.DataFrame, target: int) -> str:
+        up = df["high"].rolling(self.entry).max().shift(1).iloc[-1]
+        lo = df["low"].rolling(self.exit).min().shift(1).iloc[-1]
+        c = df["close"].iloc[-1]
+        if target:
+            return f"{self.entry}일 최고가 돌파 후 추세 유지 · 어제 종가 {c:,.0f} (이탈선 {lo:,.0f})"
+        return f"{self.exit}일 최저가 이탈 · 어제 종가 {c:,.0f} < {lo:,.0f}" if c < lo else \
+            f"돌파 대기 · 어제 종가 {c:,.0f} (돌파선 {up:,.0f})"
 
 
 class SmaFlowStrategy(Strategy):
@@ -137,6 +178,11 @@ class SmaFlowStrategy(Strategy):
                 state = 0
             pos.append(state)
         return pd.Series(pos, index=df.index, dtype=int)
+
+    def explain(self, df: pd.DataFrame, target: int) -> str:
+        base = SmaCrossStrategy(self.short, self.long).explain(df, target)
+        fl = self.flow_sum(df).iloc[-1]
+        return f"{base} · 최근 {self.flow_days}일 외국인+기관 {fl:+,.0f}주" if pd.notna(fl) else base
 
 
 class VolatilityBreakoutStrategy(Strategy):
@@ -210,6 +256,25 @@ class DualMomentumStrategy(Strategy):
         above = [float(c.iloc[-1]) > float(c.iloc[-self.market_ma:].mean())
                  for c in closes.values() if len(c) >= self.market_ma]
         return not above or sum(above) * 2 >= len(above)
+
+    def reasons(self, closes: dict[str, pd.Series]) -> dict[str, str]:
+        """보고용: 종목별 선택/제외 이유."""
+        mom = self.momentum(closes)
+        ranked = sorted(mom, key=mom.get, reverse=True)
+        hurdle = (1 + self.rf) ** (self.lookback / 252) - 1
+        market = self.market_ok(closes)
+        out = {}
+        for k, sym in enumerate(ranked, 1):
+            m = f"최근 {self.lookback}거래일 {mom[sym]:+.1%} · {len(ranked)}종목 중 {k}위"
+            if not market:
+                out[sym] = f"{m} · 시장 필터(하락장) → 전부 현금"
+            elif k > self.top_n:
+                out[sym] = f"{m} (상위 {self.top_n} 밖)"
+            elif mom[sym] <= hurdle:
+                out[sym] = f"{m} · 수익률이 기준({hurdle:+.1%}) 이하"
+            else:
+                out[sym] = f"{m} (상위 {self.top_n})"
+        return out
 
     def select(self, closes: dict[str, pd.Series]) -> list[str]:
         if not self.market_ok(closes):

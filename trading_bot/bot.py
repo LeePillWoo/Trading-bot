@@ -182,6 +182,7 @@ class TradingBot:
         self._last_errors: dict[str, float] = {}
         self._prev_closes: dict[str, tuple] = {}  # 종목 -> (날짜, 전일 종가) 하루 캐시
         self.flow_notes: dict[str, str] = {}
+        self.reasons: dict[str, str] = {}  # 오늘 판단에서 종목별 매수/매도 이유 (보고용)
         if scalp_cfg and scalp_cfg.budget_pct > 0:
             from .scalp import ScalpManager
             self.scalp = ScalpManager(self, scalp_cfg)
@@ -394,6 +395,8 @@ class TradingBot:
                              f"  {t['buy']:,.0f} → 약 {t['sell']:,.0f}")
             else:
                 lines.append(f"🔴 매수 {name} {t['buy']:,.0f} × {qty} = {won(t['buy'] * qty)}")
+            if t.get("reason"):
+                lines.append(f"  {i(t['reason'])}")
         if cost_sum:
             fee = cost_sum * self.cfg.commission + proceeds_sum * (self.cfg.commission + self.cfg.sell_tax)
             lines.append(f"{i('매도 합계')} {arrow(total)} {b(f'{total:+,.0f}원')} ({pct(total / cost_sum)})"
@@ -460,7 +463,7 @@ class TradingBot:
         self.state.save()
         return res.ok
 
-    def _buy(self, sleeve: Sleeve, symbol: str, equity: float, cash: float, weight: float) -> bool:
+    def _buy(self, sleeve: Sleeve, symbol: str, equity: float, cash: float, weight: float, reason: str = "") -> bool:
         if not self._can_order():
             return False
         price = self.broker.current_price(symbol)
@@ -476,9 +479,11 @@ class TradingBot:
         self.state.orders += 1
         if res.ok:
             self.ledger(sleeve)[symbol] = {"qty": res.qty, "price": price, "ref": price}
-            self.state.trades_today.append({"side": "buy", "symbol": symbol, "qty": res.qty, "buy": price})
+            self.state.trades_today.append({"side": "buy", "symbol": symbol, "qty": res.qty, "buy": price,
+                                            "reason": reason})
+            why = f"이유: {esc(reason)}\n" if reason else ""
             self.notify(f"🔴 {b(f'{sleeve.tag}매수 주문')} {esc(self.label_of(symbol))}\n"
-                        f"매수 약 {price:,.0f} × {res.qty} = 약 {won(res.qty * price)}\n"
+                        f"매수 약 {price:,.0f} × {res.qty} = 약 {won(res.qty * price)}\n{why}"
                         f"주문번호 {esc(res.order_id)}", html=True)
         else:
             self.notify_error(f"{sleeve.tag}매수 실패 {self.label_of(symbol)}: {res.message}")
@@ -515,6 +520,10 @@ class TradingBot:
                 targets[sym] = 0
             else:
                 targets[sym] = int(strategy.signals(past).iloc[-1])
+                try:
+                    self.reasons[sym] = strategy.explain(past, targets[sym])
+                except Exception:
+                    log.exception("%s 매매 이유 계산 실패", sym)
         return targets, trading_day
 
     def check_risk(self, acc: Account) -> None:
@@ -569,6 +578,7 @@ class TradingBot:
             return {}, trading_day, ""  # 일부 종목 조회 실패 → 다음 점검 때 재시도
         selected = strategy.select(closes)
         mom = strategy.momentum(closes)
+        self.reasons.update(strategy.reasons(closes))
         note = "\n".join(f"· {esc(self.label_of(s))} {arrow(mom[s])} {pct(mom[s], 1)}{' ✅' if s in selected else ''}"
                          for s in sorted(mom, key=mom.get, reverse=True))
         return {s: int(s in selected) for s in sleeve.symbols}, trading_day, note
@@ -608,12 +618,13 @@ class TradingBot:
         acc = self.broker.account()
         for sym, target in targets.items():  # 매도 먼저
             if target == 0 and sym in self.ledger(sleeve):
-                self._sell(sleeve, sym, acc, reason)
+                why = self.reasons.get(sym) or ("후보 종목에서 제외" if sym not in sleeve.symbols else "")
+                self._sell(sleeve, sym, acc, f"{reason}: {why}" if why else reason)
         acc = self.broker.account()
         for sym, target in targets.items():
             if target == 1 and sym not in self.ledger(sleeve) and sleeve.key(sym) not in self.state.blocked:
                 equity, cash = self.budget(sleeve, acc)
-                if self._buy(sleeve, sym, equity, cash, weight):
+                if self._buy(sleeve, sym, equity, cash, weight, self.reasons.get(sym, "")):
                     acc = self.broker.account()
         return [s for s, t in targets.items()
                 if t == 1 and s not in self.ledger(sleeve) and sleeve.key(s) not in self.state.blocked]
@@ -666,6 +677,7 @@ class TradingBot:
         return "\n".join(lines)
 
     def rebalance(self, now: datetime) -> None:
+        self.reasons = {}
         acc = self.broker.account()
         if acc.equity <= 0:
             # 아무것도 못 사는데 '이번 달 리밸런싱 완료'로 기록되면 자금이 들어와도 다음 달까지 대기하게 됨

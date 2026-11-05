@@ -173,3 +173,45 @@ def test_portfolio_backtest_stop_loss():
     assert len(stopped) == 1 and stopped[0].exit_date == pd.Timestamp("2026-03-11")
     assert stopped[0].exit_price < stopped[0].entry_price * 0.85 + 1e-9  # 갭하락이라 시가(손절가 아래)에 매도
     assert all(t.reason != "손절" for t in no_stop.trades)
+
+
+def test_explain_reasons():
+    from trading_bot.strategy import make_strategy
+    idx = pd.bdate_range("2026-01-01", periods=60)
+    # 하락 → 짧은 반등: 중간에 RSI 30 아래, 마지막은 아직 70 아래
+    c = pd.Series([100 - k * 2 for k in range(50)] + [2 + k for k in range(1, 11)], index=idx, dtype=float)
+    df = pd.DataFrame({"open": c, "high": c, "low": c, "close": c, "volume": 1.0})
+    rsi = make_strategy("rsi")
+    sig = int(rsi.signals(df).iloc[-1])
+    text = rsi.explain(df, sig)
+    assert sig == 1 and "과매도(30 아래)" in text and "어제 RSI" in text
+    up = pd.Series([100 + k * 2 for k in range(60)], index=idx, dtype=float)
+    df_up = pd.DataFrame({"open": up, "high": up, "low": up, "close": up, "volume": 1.0})
+    assert "과매수" in rsi.explain(df_up, 0)
+    assert "20일 최고가 돌파" in make_strategy("breakout").explain(df_up, 1)
+    assert "상승 추세" in make_strategy("sma").explain(df_up, 1)
+
+    rot = make_strategy("rotation", lookback=20, top_n=1, rf=0.0)
+    closes = {"A": up, "B": c}
+    r = rot.reasons(closes)
+    assert "1위 (상위 1)" in r["A"] and "(상위 1 밖)" in r["B"]
+
+
+def test_sell_and_buy_reasons_reach_report(tmp_path):
+    from trading_bot.bot import KST, TradingBot
+    from trading_bot.broker.paper import PaperBroker
+    from trading_bot.config import BotConfig, RiskConfig
+    from trading_bot.strategy import make_strategy
+    idx = pd.bdate_range("2026-07-01", "2026-10-19")  # 마지막 행 = 오늘 (거래일 판정용)
+    down = pd.Series([200 - k for k in range(len(idx))], index=idx, dtype=float)
+    down.iloc[-4:] = down.iloc[-5] + pd.Series(range(1, 5), index=down.index[-4:]) * 0.5
+    df = pd.DataFrame({"open": down, "high": down, "low": down, "close": down, "volume": 1.0})
+    broker = PaperBroker(cash=1_000_000, prices={"A": df}, commission=0, sell_tax=0)
+    rec = []
+    bot = TradingBot(broker, make_strategy("rsi"), BotConfig(symbols=["A"], risk=RiskConfig(stop_loss_pct=0)),
+                     state_path=tmp_path / "s.json")
+    bot.notifier.send = lambda text, html=False: rec.append(strip_tags(text))
+    bot.step(datetime(2026, 10, 19, 9, 10, tzinfo=KST))
+    assert "A" in broker.positions
+    assert any("매수 주문" in m and "이유:" in m and "과매도" in m for m in rec)
+    assert bot.state.trades_today[0]["reason"]
