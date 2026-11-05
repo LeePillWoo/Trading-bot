@@ -118,3 +118,20 @@ def test_max_single_buys_one_expensive_share(tmp_path):
     broker3 = PaperBroker(cash=1_000_000, prices={"A": prices(150_000.0)}, commission=0, sell_tax=0)
     TradingBot(broker3, FixedSignal(1), cfg3, state_path=tmp_path / "s3.json").step(MONDAY_0910)
     assert broker3.positions == {}  # 15만 > 100만 × 10% → 안 삼
+
+
+def test_report_lists_todays_trades_with_realized_pnl(tmp_path):
+    from trading_bot.fmt import strip_tags
+    bot, broker = make_bot(tmp_path)
+    bot.step(MONDAY_0910)  # A, B 각 5000주 100원에 매수
+    broker.prices["A"] = prices(110.0)
+    bot.strategy = FixedSignal(0)
+    bot.state.rebalanced = False
+    bot.step(MONDAY_0910)  # 전부 매도: A +10%, B 0%
+    text = strip_tags(bot.account_report(broker.account()))
+    assert "오늘 매매" in text
+    assert "매수 A 100 × 5000 = 500,000원" in text
+    assert "매도 A 5000주 🔺 +50,000원 (+10.00%)" in text and "100 → 약 110" in text
+    assert "매도 합계 🔺 +50,000원 (+5.00%)" in text
+    bot.state.roll("2026-10-20")
+    assert bot.state.trades_today == [] and "오늘 매매" not in strip_tags(bot.account_report(broker.account()))

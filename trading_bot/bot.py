@@ -122,6 +122,8 @@ class BotState:
         self.pause_reason: str = data.get("pause_reason", "")
         # 단타 슬리브 상태 (scalp.ScalpManager 가 관리, 다른 장부와 분리)
         self.scalp: dict = data.get("scalp", {})
+        # 오늘 체결 접수된 매매 (보고용): {"side","symbol","qty","buy","sell","pnl","reason"}
+        self.trades_today: list[dict] = data.get("trades_today", [])
 
     def roll(self, today: str) -> None:
         if self.date != today:
@@ -129,6 +131,7 @@ class BotState:
             self.rebalanced = self.close_reported = self.holiday = False
             self.start_equity = 0.0
             self.realized_today = 0.0
+            self.trades_today = []
             self.save()
 
     def save(self) -> None:
@@ -140,7 +143,7 @@ class BotState:
             "refs_date": self.refs_date,
             "paused": self.paused, "pause_reason": self.pause_reason,
             "portfolio_month": self.portfolio_month, "holdings": self.holdings,
-            "universe": self.universe, "scalp": self.scalp,
+            "universe": self.universe, "scalp": self.scalp, "trades_today": self.trades_today,
         }, ensure_ascii=False, indent=2))
 
 
@@ -375,8 +378,31 @@ class TradingBot:
                      + ", ".join(f"{esc(self.label_of(p.symbol))} {p.qty}주" for p in others))
         return text
 
+    def trades_section(self) -> str:
+        """오늘 매매 내역: 매도는 종목별 실현 손익(매수가 대비, 세금·수수료 전), 매수는 금액."""
+        trades = self.state.trades_today
+        if not trades:
+            return ""
+        lines = [f"🧾 {b('오늘 매매')}"]
+        total = cost_sum = proceeds_sum = 0.0
+        for t in trades:
+            name, qty = esc(self.label_of(t["symbol"])), t["qty"]
+            if t["side"] == "sell":
+                cost, pnl = t["buy"] * qty, (t["sell"] - t["buy"]) * qty
+                total, cost_sum, proceeds_sum = total + pnl, cost_sum + cost, proceeds_sum + t["sell"] * qty
+                lines.append(f"🔵 매도 {name} {qty}주 {arrow(pnl)} {b(f'{pnl:+,.0f}원')} ({pct(pnl / cost if cost else 0.0)})\n"
+                             f"  {t['buy']:,.0f} → 약 {t['sell']:,.0f}")
+            else:
+                lines.append(f"🔴 매수 {name} {t['buy']:,.0f} × {qty} = {won(t['buy'] * qty)}")
+        if cost_sum:
+            fee = cost_sum * self.cfg.commission + proceeds_sum * (self.cfg.commission + self.cfg.sell_tax)
+            lines.append(f"{i('매도 합계')} {arrow(total)} {b(f'{total:+,.0f}원')} ({pct(total / cost_sum)})"
+                         f" {i('· 세금·수수료 약')} {fee:,.0f}원 별도")
+        return "\n".join(lines)
+
     def account_report(self, acc: Account) -> str:
-        return "\n\n".join([self.account_section(acc), self.pnl_section(acc), self.holdings_section(acc)])
+        parts = [self.account_section(acc), self.pnl_section(acc), self.trades_section(), self.holdings_section(acc)]
+        return "\n\n".join(p for p in parts if p)
 
     # ---------- 주문 헬퍼 ----------
     def _can_order(self) -> bool:
@@ -412,6 +438,8 @@ class TradingBot:
                             f"남은 {held['qty']}주는 다음 점검 때 다시 시도합니다.")
             else:
                 self.ledger(sleeve).pop(symbol, None)
+            self.state.trades_today.append({"side": "sell", "symbol": symbol, "qty": res.qty, "buy": held["price"],
+                                            "sell": sell_price, "reason": reason})
             self.state.realized_today += res.qty * (sell_price - held.get("ref", held["price"]))
             self.state.realized_total += res.qty * (sell_price - held["price"])
             cost, proceeds = res.qty * held["price"], res.qty * sell_price
@@ -448,6 +476,7 @@ class TradingBot:
         self.state.orders += 1
         if res.ok:
             self.ledger(sleeve)[symbol] = {"qty": res.qty, "price": price, "ref": price}
+            self.state.trades_today.append({"side": "buy", "symbol": symbol, "qty": res.qty, "buy": price})
             self.notify(f"🔴 {b(f'{sleeve.tag}매수 주문')} {esc(self.label_of(symbol))}\n"
                         f"매수 약 {price:,.0f} × {res.qty} = 약 {won(res.qty * price)}\n"
                         f"주문번호 {esc(res.order_id)}", html=True)
