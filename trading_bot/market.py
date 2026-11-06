@@ -37,8 +37,10 @@ def market_report(broker, symbols: list[str], strategy, names: dict[str, str]) -
     label = lambda s: f"{names.get(s, s)}({s})"  # noqa: E731
     lines = []
 
+    mkt = None
     try:
-        bm = _row(broker.daily_ohlcv(BENCHMARK[0], days), ma, lookback)
+        bm_df = broker.daily_ohlcv(BENCHMARK[0], days)
+        bm, mkt = _row(bm_df, ma, lookback), bm_df["close"].rename("mkt")
     except Exception as e:  # 벤치마크는 참고용
         bm, err = None, e
     if bm:
@@ -89,6 +91,14 @@ def market_report(broker, symbols: list[str], strategy, names: dict[str, str]) -
         lines += ["", f"[{strategy.name} 판단] 오늘 09:05 기준"]
         for s, df in frames.items():
             past = df[df.index.date < date.today()] if len(df) else df
+            if getattr(strategy, "needs_flow", False):
+                from .strategy import with_flow
+                try:
+                    past = with_flow(past, broker.investor_flow(s, 60))
+                except Exception:
+                    pass
+            if mkt is not None:
+                past = past.join(mkt, how="left")
             if len(past) < strategy.warmup:
                 continue
             sig = int(strategy.signals(past).iloc[-1])

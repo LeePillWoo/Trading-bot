@@ -72,18 +72,32 @@ class SmaCrossStrategy(Strategy):
 
 
 class RsiStrategy(Strategy):
-    """RSI가 과매도(oversold) 아래로 내려가면 매수, 과매수(overbought) 위로 올라가면 매도."""
+    """RSI가 과매도(oversold) 아래로 내려가면 매수, 과매수(overbought) 위로 올라가면 매도.
+
+    상황 판단 손절 (guard > 0):
+    과매도 매수는 '잠깐 빠졌다가 반등한다'에 거는 것이다. 그 판단이 틀린 신호가 나오면 판다.
+    - 신호일 종가보다 guard(예 10%) 넘게 더 빠졌는데
+      · 최근 flow_days 일 외국인+기관(연기금 포함)이 순매도 중이거나 (큰손 이탈)
+      · 같은 기간 시장(코스피200)보다 guard/2 넘게 더 빠졌으면 (시장 탓이 아닌 종목 문제)
+      → '바닥이 안 보이는 하락'으로 보고 매도.
+    - 시장 전체가 같이 빠졌고 큰손이 사들이고 있으면 → 일시적 하락(기회)으로 보고 계속 보유.
+    - 신호일 대비 floor(예 25%) 넘게 빠지면 이유 불문 매도 (최후 안전장치).
+    손절 후에는 RSI가 50 위로 회복하기 전까지 다시 사지 않는다 (떨어지는 칼날 반복 매수 방지).
+    시장 데이터는 df["mkt"] (코스피200 추종 지수 종가), 수급은 df["foreign"], df["institution"].
+    """
 
     name = "rsi"
+    REARM = 50  # 손절 후 재진입 허용 RSI
 
     def __init__(self, period: int = 14, oversold: float = 30, overbought: float = 70,
-                 rank: int = 1, flow: int = 0, flow_days: int = 5):
+                 rank: int = 1, flow: int = 0, flow_days: int = 5, guard: float = 0.0, floor: float = 0.25):
         self.period, self.oversold, self.overbought = period, oversold, overbought
         self.warmup = period + 1
         # 매수 우선순위: rank=1 이면 RSI 낮은(많이 빠진) 종목부터. flow=1 이면 최근 flow_days 일
-        # 외국인+기관(연기금 포함) 순매수가 플러스인 종목을 먼저, 그 안에서 RSI 낮은 순. 매수/매도 신호 자체는 그대로.
+        # 외국인+기관(연기금 포함) 순매수가 플러스인 종목을 먼저, 그 안에서 RSI 낮은 순.
         self.rank, self.flow, self.flow_days = rank, flow, flow_days
-        self.needs_flow = bool(flow)
+        self.guard, self.floor = guard, floor
+        self.needs_flow = bool(flow or guard)
 
     def flow_sum(self, df: pd.DataFrame) -> pd.Series:
         if not {"foreign", "institution"} <= set(df.columns):
@@ -106,30 +120,78 @@ class RsiStrategy(Strategy):
         rs = gain / loss
         return 100 - 100 / (1 + rs)
 
-    def signals(self, df: pd.DataFrame) -> pd.Series:
+    def _walk(self, df: pd.DataFrame) -> tuple[list[int], dict]:
+        """봉마다 보유 상태를 계산. 마지막 봉의 판단 근거(info)도 같이 돌려준다 (보고용)."""
         rsi = self.rsi(df["close"], self.period)
-        pos, state = [], 0
-        for value in rsi:
+        close = df["close"].to_numpy(dtype=float)
+        mkt = df["mkt"].to_numpy(dtype=float) if "mkt" in df.columns else None
+        flow = self.flow_sum(df).to_numpy(dtype=float)
+        pos, state, armed = [], 0, True
+        entry = info = None
+        for k, value in enumerate(rsi):
+            info = None
             if pd.notna(value):
-                if value < self.oversold:
-                    state = 1
+                if state == 0:
+                    if not armed and value > self.REARM:
+                        armed = True
+                    if armed and value < self.oversold:
+                        state, entry = 1, k
                 elif value > self.overbought:
                     state = 0
+                elif self.guard:
+                    drop = close[k] / close[entry] - 1
+                    mdrop = mkt[k] / mkt[entry] - 1 if mkt is not None and mkt[entry] > 0 else float("nan")
+                    info = {"entry": df.index[entry], "drop": drop, "mdrop": mdrop, "flow": flow[k]}
+                    cut = ""
+                    if drop <= -self.floor:
+                        cut = "floor"
+                    elif drop <= -self.guard:
+                        if flow[k] < 0:
+                            cut = "flow"
+                        elif drop - mdrop <= -self.guard / 2:
+                            cut = "relative"
+                    if cut:
+                        info["cut"] = cut
+                        state, armed = 0, False
             pos.append(state)
-        return pd.Series(pos, index=df.index, dtype=int)
+        return pos, info or {}
+
+    def signals(self, df: pd.DataFrame) -> pd.Series:
+        return pd.Series(self._walk(df)[0], index=df.index, dtype=int)
+
+    def guard_note(self, info: dict) -> str:
+        if not info:
+            return ""
+        parts = [f"{_md(info['entry'])} 신호 이후 {info['drop']:+.1%}"]
+        if pd.notna(info["mdrop"]):
+            parts.append(f"시장 {info['mdrop']:+.1%}")
+        if pd.notna(info["flow"]):
+            parts.append(f"외국인+기관 {self.flow_days}일 {info['flow']:+,.0f}주")
+        return " · ".join(parts)
 
     def explain(self, df: pd.DataFrame, target: int) -> str:
         rsi = self.rsi(df["close"], self.period).dropna()
         if rsi.empty:
             return ""
         now = rsi.iloc[-1]
+        _, info = self._walk(df)
+        if info.get("cut"):
+            why = {"floor": f"신호일 대비 {self.floor:.0%} 넘게 하락 (최후 안전장치)",
+                   "flow": "더 빠지는데 외국인+기관이 계속 팔고 있음 (큰손 이탈)",
+                   "relative": "시장보다 훨씬 더 빠짐 (시장 탓이 아닌 종목 문제)"}[info["cut"]]
+            return f"상황 판단 손절: {why} · {self.guard_note(info)}"
         if target:
             low = rsi[rsi < self.oversold]
             when = f"{_md(low.index[-1])} RSI {low.iloc[-1]:.0f}로 과매도({self.oversold:g} 아래) → 반등 노림" if len(low) else ""
             text = f"{when} · 어제 RSI {now:.0f}".strip(" ·")
-            fl = self.flow_sum(df).iloc[-1]
-            if pd.notna(fl):
-                text += f" · 외국인+기관 {self.flow_days}일 {fl:+,.0f}주{' (순매수)' if fl > 0 else ''}"
+            if info:
+                text += f" · {self.guard_note(info)}"
+                if info["drop"] <= -self.guard:
+                    text += " → 시장과 같이 빠졌고 큰손 매수 중: 일시적 하락으로 보고 보유"
+            else:
+                fl = self.flow_sum(df).iloc[-1]
+                if pd.notna(fl):
+                    text += f" · 외국인+기관 {self.flow_days}일 {fl:+,.0f}주{' (순매수)' if fl > 0 else ''}"
             return text
         high = rsi[rsi > self.overbought]
         if len(high) and high.index[-1] == rsi.index[-1]:

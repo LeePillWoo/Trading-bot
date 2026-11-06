@@ -227,7 +227,13 @@ def load_data(args, symbols: list[str]) -> dict:
     if args.csv:
         return {Path(f).stem: load_csv(f) for f in args.csv}
     if args.fetch:
+        from .market import BENCHMARK
         api, _ = make_api_broker(args.api, require_account=False)
+        try:  # 시장(코스피200 추종) 종가: 상황 판단 손절이 시장 흐름과 비교할 때 쓴다
+            mkt = api.daily_ohlcv(BENCHMARK[0], args.days)["close"].rename("mkt")
+        except Exception as e:
+            print(f"(시장 지수 데이터 없음: {e})")
+            mkt = None
         data = {}
         for s in symbols:
             df = api.daily_ohlcv(s, args.days)
@@ -235,7 +241,7 @@ def load_data(args, symbols: list[str]) -> dict:
                 df = with_flow(df, api.investor_flow(s, args.days))
             except Exception as e:
                 print(f"({s} 수급 데이터 없음: {e})")
-            data[s] = df
+            data[s] = df.join(mkt, how="left") if mkt is not None else df
         return data
     return {s: synthetic_ohlcv(args.days, seed=i) for i, s in enumerate(symbols)}
 

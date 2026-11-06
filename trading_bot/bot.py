@@ -540,6 +540,13 @@ class TradingBot:
         """(종목별 목표 포지션, 오늘 거래일 여부). 오늘 일봉이 하나라도 있으면 거래일."""
         strategy = sleeve.strategy
         targets, trading_day = {}, False
+        mkt = None
+        if getattr(strategy, "guard", 0):  # 상황 판단 손절: 시장(코스피200 추종) 흐름과 비교
+            from .market import BENCHMARK
+            try:
+                mkt = self.broker.daily_ohlcv(BENCHMARK[0], days=strategy.warmup + 250)["close"].rename("mkt")
+            except Exception as e:
+                log.warning("시장 지수 조회 실패 (시장 비교 없이 판단): %s", e)
         for sym in sleeve.symbols:
             try:
                 # RSI·돌파처럼 '진입 후 청산 신호까지 보유'하는 전략은 진입 시점이 수개월 전일 수 있어
@@ -551,6 +558,8 @@ class TradingBot:
                 continue
             trading_day |= bool((df.index >= today).any())
             past = df[df.index < today]  # 장중 미완성 봉 제외
+            if mkt is not None:
+                past = past.join(mkt, how="left")
             if getattr(strategy, "needs_flow", False):
                 try:
                     flow = self.broker.investor_flow(sym, days=strategy.warmup + 60)
@@ -721,8 +730,11 @@ class TradingBot:
             return f"⚠️ {esc(sleeve.tag)}데이터 조회 실패 — 다음에 재시도"
         self._apply_targets(sleeve, targets, self.cfg.risk.max_position_pct, "매도 신호")
         lines = [f"📋 {b(f'{sleeve.tag}신호')}"]
-        lines += [f"{'🟢' if t else '⚪'} {esc(self.label_of(s))} — {'보유' if t else '미보유'}"
-                  for s, t in targets.items()]
+        held = self.ledger(sleeve)
+        for s, t in targets.items():
+            lines.append(f"{'🟢' if t else '⚪'} {esc(self.label_of(s))} — {'보유' if t else '미보유'}")
+            if s in held and self.reasons.get(s):  # 들고 있는 종목은 판단 근거(시장·수급 상황)도 표시
+                lines.append(f"   {i(self.reasons[s])}")
         if self.flow_notes:
             lines.append(i("수급 (최근 5일 순매수)"))
             lines += [f"· {esc(self.label_of(s))} {esc(n)}" for s, n in self.flow_notes.items()]

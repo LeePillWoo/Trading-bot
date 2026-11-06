@@ -271,3 +271,53 @@ def test_rsi_priority_orders_buys_backtest():
     assert first(make_strategy("rsi")) == "B"
     data["A"]["foreign"] = 1000.0
     assert first(make_strategy("rsi", flow=1)) == "A"
+
+
+def _guard_df(stock_moves, mkt_moves, flow):
+    """신호(과매도) 이후 종목·시장 움직임을 만든다. 앞부분은 ±1 지그재그 후 하루 급락으로 과매도."""
+    n0 = 40
+    idx = pd.bdate_range("2026-06-01", periods=n0 + 1 + len(stock_moves))
+    base = [100.0 + (k % 2) for k in range(n0)] + [88.0]
+    c = list(base)
+    for m in stock_moves:
+        c.append(c[-1] * (1 + m))
+    mk = [100.0] * (n0 + 1)
+    for m in mkt_moves:
+        mk.append(mk[-1] * (1 + m))
+    close = pd.Series(c, index=idx)
+    return pd.DataFrame({"open": close, "high": close, "low": close, "close": close, "volume": 1.0,
+                         "mkt": mk, "foreign": flow, "institution": 0.0})
+
+
+def test_rsi_guard_cuts_when_thesis_fails():
+    from trading_bot.strategy import make_strategy
+    rsi = make_strategy("rsi", guard=0.1)
+    # 신호 뒤 종목만 -15% (시장 보합), 큰손 순매도 → 손절
+    df = _guard_df([-0.03] * 5, [0.0] * 5, flow=-1000.0)
+    sig = rsi.signals(df)
+    assert sig.iloc[40] == 1 and sig.iloc[-1] == 0
+    cut_day = sig[sig.diff() == -1].index[0]
+    assert "큰손 이탈" in rsi.explain(df.loc[:cut_day], 0)
+    # 손절 기능을 끄면 계속 보유
+    assert make_strategy("rsi").signals(df).iloc[-1] == 1
+
+
+def test_rsi_guard_holds_through_market_wide_dip_with_buying():
+    from trading_bot.strategy import make_strategy
+    rsi = make_strategy("rsi", guard=0.1)
+    # 시장도 같이 -15%, 큰손 순매수 → 일시적 하락으로 보고 보유
+    df = _guard_df([-0.03] * 5, [-0.03] * 5, flow=+1000.0)
+    assert rsi.signals(df).iloc[-1] == 1
+    assert "일시적 하락으로 보고 보유" in rsi.explain(df, 1)
+    # 시장과 같이 빠졌어도 큰손이 팔면 → 손절
+    assert rsi.signals(_guard_df([-0.03] * 5, [-0.03] * 5, flow=-1000.0)).iloc[-1] == 0
+
+
+def test_rsi_guard_floor_and_no_immediate_reentry():
+    from trading_bot.strategy import make_strategy
+    rsi = make_strategy("rsi", guard=0.1, floor=0.25)
+    # 시장도 같이 폭락, 큰손 매수여도 -30% 면 최후 안전장치로 매도
+    df = _guard_df([-0.06] * 5 + [0.0] * 5, [-0.06] * 5 + [0.0] * 5, flow=+1000.0)
+    sig = rsi.signals(df)
+    assert sig.iloc[-1] == 0  # 손절 뒤 RSI 가 아직 낮아도 바로 다시 사지 않음
+    assert "최후 안전장치" in rsi.explain(df.loc[:sig[sig.diff() == -1].index[0]], 0)
