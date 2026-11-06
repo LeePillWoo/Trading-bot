@@ -154,3 +154,45 @@ def test_equity_counts_unsettled_bot_positions(tmp_path):
     # 예전에는 첫 매수 뒤 총자산을 현금(70만)으로 읽어 예산이 0 → 나머지 못 삼
     assert {s: p.qty for s, p in broker.positions.items()} == {"A": 3000, "B": 3000, "C": 3000}
     assert bot.bot_equity(broker.account()) == 1_000_000
+
+
+def test_circuit_breaker_rejection_retries_later(tmp_path):
+    from trading_bot.broker.base import OrderResult
+
+    class Halted(PaperBroker):
+        halted = True
+
+        def buy(self, symbol, qty, price=0):
+            if self.halted:
+                return OrderResult(symbol, "buy", qty, price, ok=False,
+                                   message="[21824] CB 1단계 발동중으로 주문처리가 불가합니다.")
+            return super().buy(symbol, qty, price)
+
+    broker = Halted(cash=1_000_000, prices={"A": prices(), "B": prices()}, commission=0, sell_tax=0)
+    cfg = BotConfig(symbols=["A", "B"], risk=RiskConfig(max_position_pct=0.5), commission=0)
+    sent = []
+    bot = TradingBot(broker, FixedSignal(1), cfg, state_path=tmp_path / "s.json")
+    bot.notifier.send = lambda text, html=False: sent.append(text)
+    bot.step(MONDAY_0910)
+    assert broker.positions == {} and not bot.state.rebalanced and bot.state.orders == 0
+    assert sum("거래 중단" in m for m in sent) == 1  # 종목마다 오류 알림을 보내지 않고 한 번만
+    assert not any("오류" in m for m in sent)
+    broker.halted = False  # 20분 뒤 거래 재개
+    bot.step(MONDAY_0910)
+    assert set(broker.positions) == {"A", "B"} and bot.state.rebalanced
+    assert any("오늘의 매매 완료" in m for m in sent)
+
+
+def test_circuit_breaker_gives_up_after_retries(tmp_path):
+    from trading_bot.bot import HALT_RETRIES
+    from trading_bot.broker.base import OrderResult
+
+    class Halted(PaperBroker):
+        def buy(self, symbol, qty, price=0):
+            return OrderResult(symbol, "buy", qty, price, ok=False, message="CB 2단계 발동")
+
+    broker = Halted(cash=1_000_000, prices={"A": prices()}, commission=0, sell_tax=0)
+    bot = TradingBot(broker, FixedSignal(1), BotConfig(symbols=["A"]), state_path=tmp_path / "s.json")
+    for _ in range(HALT_RETRIES):
+        bot.step(MONDAY_0910)
+    assert bot.state.rebalanced and bot.state.halt_tries == HALT_RETRIES

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, time as dtime
@@ -42,6 +43,13 @@ MARKET_CLOSE = dtime(15, 30)
 CLOSE_REPORT_TIME = dtime(15, 35)
 ERROR_NOTIFY_INTERVAL = 1800  # 같은 오류는 30분에 한 번만 알림
 HEARTBEAT_SEC = 3600  # 1시간마다 로그에 작동 기록
+HALT_RETRIES = 8  # 서킷브레이커 등 거래 중단으로 주문이 거부되면 점검 주기마다 최대 이 횟수까지 다시 시도
+_HALT = re.compile(r"CB|서킷|브레이커|거래\s*중단|거래\s*정지|매매\s*정지")
+
+
+def is_halt(message: str) -> bool:
+    """증권사 주문 거부 사유가 시장 전체/종목 거래 중단(서킷브레이커 등)인지."""
+    return bool(_HALT.search(message or ""))
 
 COMMANDS = [("/status", "간단 상태"), ("/report", "자세한 계좌 보고서"),
             ("/stop", "비상정지 (모든 주문 중단)"), ("/start", "매매 재개"),
@@ -124,6 +132,7 @@ class BotState:
         self.scalp: dict = data.get("scalp", {})
         # 오늘 체결 접수된 매매 (보고용): {"side","symbol","qty","buy","sell","pnl","reason"}
         self.trades_today: list[dict] = data.get("trades_today", [])
+        self.halt_tries: int = data.get("halt_tries", 0)  # 오늘 거래 중단으로 매매를 다시 시도한 횟수
 
     def roll(self, today: str) -> None:
         if self.date != today:
@@ -132,6 +141,7 @@ class BotState:
             self.start_equity = 0.0
             self.realized_today = 0.0
             self.trades_today = []
+            self.halt_tries = 0
             self.save()
 
     def save(self) -> None:
@@ -144,6 +154,7 @@ class BotState:
             "paused": self.paused, "pause_reason": self.pause_reason,
             "portfolio_month": self.portfolio_month, "holdings": self.holdings,
             "universe": self.universe, "scalp": self.scalp, "trades_today": self.trades_today,
+            "halt_tries": self.halt_tries,
         }, ensure_ascii=False, indent=2))
 
 
@@ -184,6 +195,7 @@ class TradingBot:
         self.flow_notes: dict[str, str] = {}
         self.reasons: dict[str, str] = {}  # 오늘 판단에서 종목별 매수/매도 이유 (보고용)
         self.priority: dict[str, float] = {}  # 오늘 매수 우선순위 (작을수록 먼저)
+        self.halted = ""  # 이번 매매 중 거래 중단(서킷브레이커 등)으로 거부된 사유
         if scalp_cfg and scalp_cfg.budget_pct > 0:
             from .scalp import ScalpManager
             self.scalp = ScalpManager(self, scalp_cfg)
@@ -457,6 +469,10 @@ class TradingBot:
         except Exception:
             sell_price = held["price"]
         res = self.broker.sell(symbol, qty)
+        if not res.ok and is_halt(res.message):
+            self.halted = res.message  # 거래 중단: 주문이 나가지 않았으므로 횟수에 안 셈, 나중에 다시 시도
+            log.warning("매도 거부(거래 중단) %s: %s", symbol, res.message)
+            return False
         self.state.orders += 1
         if res.ok:
             if res.qty < qty:
@@ -501,6 +517,10 @@ class TradingBot:
             log.info("매수 건너뜀 %s: 주문 가능 수량 0 (현금 %.0f, 가격 %.0f)", symbol, cash, price)
             return False
         res = self.broker.buy(symbol, qty)
+        if not res.ok and is_halt(res.message):
+            self.halted = res.message
+            log.warning("매수 거부(거래 중단) %s: %s", symbol, res.message)
+            return False
         self.state.orders += 1
         if res.ok:
             self.ledger(sleeve)[symbol] = {"qty": res.qty, "price": price, "ref": price}
@@ -644,12 +664,16 @@ class TradingBot:
         self.state.save()
         acc = self.broker.account()
         for sym, target in targets.items():  # 매도 먼저
+            if self.halted:
+                break
             if target == 0 and sym in self.ledger(sleeve):
                 why = self.reasons.get(sym) or ("후보 종목에서 제외" if sym not in sleeve.symbols else "")
                 self._sell(sleeve, sym, acc, f"{reason}: {why}" if why else reason)
         acc = self.broker.account()
         # 매수는 우선순위 순 (rsi: RSI 낮은 종목부터). 같으면 후보 목록 순서
         for sym, target in sorted(targets.items(), key=lambda kv: self.priority.get(kv[0], 0.0)):
+            if self.halted:
+                break  # 거래 중단 중: 나머지 종목도 거부되므로 더 시도하지 않음
             if target == 1 and sym not in self.ledger(sleeve) and sleeve.key(sym) not in self.state.blocked:
                 equity, cash = self.budget(sleeve, acc)
                 if self._buy(sleeve, sym, equity, cash, weight, self.reasons.get(sym, "")):
@@ -705,7 +729,7 @@ class TradingBot:
         return "\n".join(lines)
 
     def rebalance(self, now: datetime) -> None:
-        self.reasons, self.priority = {}, {}
+        self.reasons, self.priority, self.halted = {}, {}, ""
         acc = self.broker.account()
         if self.bot_equity(acc) <= 0:
             # 아무것도 못 사는데 '이번 달 리밸런싱 완료'로 기록되면 자금이 들어와도 다음 달까지 대기하게 됨
@@ -721,6 +745,14 @@ class TradingBot:
                 self.notify("오늘은 휴장일로 판단되어 매매하지 않습니다. (오늘 일봉 없음)")
                 return
             parts.append(part)
+        if self.halted:
+            self.state.halt_tries += 1
+            left = HALT_RETRIES - self.state.halt_tries
+            if left > 0:
+                self.notify(f"⏸ {b('거래 중단으로 주문이 거부됐습니다')} (서킷브레이커 등)\n{esc(self.halted)}\n"
+                            f"{self.cfg.interval_sec // 60}분 뒤 다시 시도합니다 (남은 {left}회).", html=True)
+                return
+            self.notify(f"⚠️ 거래 중단이 계속돼 오늘 매매를 마칩니다 ({HALT_RETRIES}회 시도). 다음 거래일 09:05에 다시 판단합니다.")
         acc = self.broker.account()
         title = f"☀️ {b('오늘의 매매 완료')} · {kdate(now)}"
         if len(self.sleeves) == 1 and parts[0].startswith("📅"):
@@ -821,6 +853,8 @@ class TradingBot:
         self.check_risk(self.broker.account())
         if not self.state.paused and not self.state.rebalanced and now.time() >= self.trade_time:
             self.rebalance(now)
+            if self.halted and self.state.halt_tries < HALT_RETRIES:
+                return  # 거래 중단: 완료로 기록하지 않고 다음 점검 때 다시 시도
             self.state.rebalanced = True
             self.state.save()
 
