@@ -196,3 +196,26 @@ def test_circuit_breaker_gives_up_after_retries(tmp_path):
     for _ in range(HALT_RETRIES):
         bot.step(MONDAY_0910)
     assert bot.state.rebalanced and bot.state.halt_tries == HALT_RETRIES
+
+
+def test_broker_buyable_quantity_is_authoritative(tmp_path):
+    """증권사가 시장가 매수 가능 수량을 0(상한가 기준 증거금 부족)으로 답하면 오류 대신 '현금 부족'으로 보고한다."""
+    from trading_bot.fmt import strip_tags
+
+    class MarginBroker(PaperBroker):
+        def buyable_quantity(self, symbol, price=0):
+            px = self.current_price(symbol) * 1.3  # 시장가 증거금 = 상한가 기준
+            return int(self.cash // px)
+
+    # 현금 100만, A 80만원: 봇은 1주 가능으로 보지만 증권사(상한가 104만)는 0주
+    broker = MarginBroker(cash=1_000_000, prices={"A": prices(800_000.0), "B": prices(100.0)}, commission=0, sell_tax=0)
+    cfg = BotConfig(symbols=["A", "B"], risk=RiskConfig(max_position_pct=0.9, max_single_pct=0.9), commission=0)
+    sent = []
+    bot = TradingBot(broker, FixedSignal(1), cfg, state_path=tmp_path / "s.json")
+    bot.notifier.send = lambda text, html=False: sent.append(strip_tags(text))
+    bot.step(MONDAY_0910)
+    assert "A" not in broker.positions and "B" in broker.positions
+    assert not any("오류" in m for m in sent)
+    assert any("현금 부족으로 못 산 종목: A" in m for m in sent)
+    # 증권사 가능 수량이 봇 계산보다 적으면 그 수량으로 줄여서 산다: B 90만원 몫 = 9000주, 상한가 기준 → 7692주
+    assert broker.positions["B"].qty == 7692

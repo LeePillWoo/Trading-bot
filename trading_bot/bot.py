@@ -196,6 +196,7 @@ class TradingBot:
         self.reasons: dict[str, str] = {}  # 오늘 판단에서 종목별 매수/매도 이유 (보고용)
         self.priority: dict[str, float] = {}  # 오늘 매수 우선순위 (작을수록 먼저)
         self.halted = ""  # 이번 매매 중 거래 중단(서킷브레이커 등)으로 거부된 사유
+        self.unaffordable: list[str] = []  # 이번 매매에서 현금이 모자라 못 산 종목 (보고용)
         if scalp_cfg and scalp_cfg.budget_pct > 0:
             from .scalp import ScalpManager
             self.scalp = ScalpManager(self, scalp_cfg)
@@ -514,8 +515,23 @@ class TradingBot:
         if qty <= 0 and self.cfg.risk.max_single_pct and one <= min(cash, equity * self.cfg.risk.max_single_pct):
             qty = 1  # 몫(비중)보다 비싼 종목도 1주는 담는다 (총자산 대비 max_single_pct 이하일 때만)
         if qty <= 0:
-            log.info("매수 건너뜀 %s: 주문 가능 수량 0 (현금 %.0f, 가격 %.0f)", symbol, cash, price)
+            log.info("매수 건너뜀 %s: 현금 부족 (현금 %.0f, 가격 %.0f)", symbol, cash, price)
+            self.unaffordable.append(symbol)
             return False
+        # 증권사 기준 매수 가능 수량에 맞춘다. 시장가 주문은 증거금을 상한가(+30%) 기준으로 잡기 때문에
+        # 현금이 1주 가격은 넘어도 증권사가 0주로 답할 수 있다 → 오류가 아니라 '현금 부족'으로 처리
+        if hasattr(self.broker, "buyable_quantity"):
+            try:
+                limit = int(self.broker.buyable_quantity(symbol))
+            except Exception as e:
+                log.warning("%s 매수 가능 수량 조회 실패 (봇 계산대로 진행): %s", symbol, e)
+                limit = qty
+            if limit <= 0:
+                log.info("매수 건너뜀 %s: 증권사 매수 가능 수량 0 (시장가 증거금 상한가 기준, 현금 %.0f, 가격 %.0f)",
+                         symbol, cash, price)
+                self.unaffordable.append(symbol)
+                return False
+            qty = min(qty, limit)
         res = self.broker.buy(symbol, qty)
         if not res.ok and is_halt(res.message):
             self.halted = res.message
@@ -735,13 +751,16 @@ class TradingBot:
             lines.append(f"{'🟢' if t else '⚪'} {esc(self.label_of(s))} — {'보유' if t else '미보유'}")
             if s in held and self.reasons.get(s):  # 들고 있는 종목은 판단 근거(시장·수급 상황)도 표시
                 lines.append(f"   {i(self.reasons[s])}")
+        if self.unaffordable:
+            lines.append(f"💤 {i('현금 부족으로 못 산 종목')}: "
+                         + ", ".join(esc(self.label_of(s)) for s in self.unaffordable))
         if self.flow_notes:
             lines.append(i("수급 (최근 5일 순매수)"))
             lines += [f"· {esc(self.label_of(s))} {esc(n)}" for s, n in self.flow_notes.items()]
         return "\n".join(lines)
 
     def rebalance(self, now: datetime) -> None:
-        self.reasons, self.priority, self.halted = {}, {}, ""
+        self.reasons, self.priority, self.halted, self.unaffordable = {}, {}, "", []
         acc = self.broker.account()
         if self.bot_equity(acc) <= 0:
             # 아무것도 못 사는데 '이번 달 리밸런싱 완료'로 기록되면 자금이 들어와도 다음 달까지 대기하게 됨
