@@ -34,6 +34,10 @@ bash $PWD/deploy/termux-start.sh
 BOOT
 chmod +x ~/.termux/boot/start-trading-bot
 
+if command -v termux-job-scheduler >/dev/null 2>&1 && timeout 15 termux-job-scheduler --pending >/dev/null 2>&1; then
+  bash deploy/termux-watchdog.sh || true   # Termux:API 가 있으면 15분마다 살아있는지 확인하는 감시 작업도 등록
+fi
+
 echo "== 4/4 봇 시작"
 bash deploy/termux-stop.sh >/dev/null 2>&1 || true
 bash deploy/termux-start.sh

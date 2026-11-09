@@ -19,7 +19,15 @@ pkg update -y && pkg install -y git && (git -C ~/Trading-bot pull || git clone -
 1. **배터리 절전 예외**: 설정 → 애플리케이션 → Termux → 배터리 → **제한 없음**
 2. **Wake lock**: 알림창의 Termux 알림에 `wake lock held` 가 보이는지 확인 (없으면 알림의 **Acquire wakelock** 터치)
 3. Termux 는 `exit` 로 닫지 말고 **홈 버튼으로 나가기**. 최근 앱 "모두 닫기" 도 주의
-4. (선택) **Termux:Boot** 앱(F-Droid) 설치 후 한 번 실행 → 폰 재부팅 시 봇 자동 시작
+4. **감시 작업 (강력 추천)**: 위 설정을 다 해도 안드로이드(특히 삼성)는 Termux 를 죽일 수 있습니다.
+   Termux 를 받은 곳과 **같은 곳**(F-Droid 또는 GitHub)에서 **Termux:API** 앱을 설치해 한 번 실행한 뒤:
+   ```bash
+   bash ~/Trading-bot/deploy/termux-watchdog.sh
+   ```
+   → 봇이 꺼져 있으면 15분 안에 자동으로 다시 켭니다 (재부팅 뒤에도 유지). 확인: `termux-job-scheduler --pending`
+5. (선택) **Termux:Boot** 앱 설치 후 한 번 실행 → 폰 재부팅 직후 바로 봇 시작 (감시 작업보다 빠름)
+6. 삼성: 설정 → 배터리 및 디바이스 케어 → **자동 최적화 → "필요 시 자동으로 다시 시작" 끄기**,
+   배터리 → 백그라운드 사용 제한 → **"절전 상태로 전환하지 않는 앱"** 에 Termux 추가
 
 ## 명령어
 

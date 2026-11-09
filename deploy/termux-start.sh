@@ -11,7 +11,8 @@ mkdir -p logs
 if [ -f logs/service.log ] && [ "$(wc -c < logs/service.log)" -gt 1000000 ]; then
   mv -f logs/service.log logs/service.log.1
 fi
-nohup bash -c 'while true; do python -m trading_bot service; echo "재시작 대기 30초"; sleep 30; done' \
+echo "$(date '+%F %T') 봇 시작 (${TERMUX_JOB:-수동})" >> logs/service.log
+nohup bash -c 'while true; do python -m trading_bot service; echo "$(date "+%F %T") 봇 프로세스 종료 → 30초 뒤 재시작"; sleep 30; done' \
   >> logs/service.log 2>&1 &
 sleep 3
 if pgrep -f "trading_bot service" >/dev/null; then
