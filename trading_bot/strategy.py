@@ -127,21 +127,22 @@ class RsiStrategy(Strategy):
         mkt = df["mkt"].to_numpy(dtype=float) if "mkt" in df.columns else None
         flow = self.flow_sum(df).to_numpy(dtype=float)
         pos, state, armed = [], 0, True
-        entry = info = None
+        entry = info = cut_info = None
         for k, value in enumerate(rsi):
             info = None
             if pd.notna(value):
                 if state == 0:
                     if not armed and value > self.REARM:
-                        armed = True
+                        armed, cut_info = True, None
                     if armed and value < self.oversold:
-                        state, entry = 1, k
+                        state, entry, cut_info = 1, k, None
                 elif value > self.overbought:
                     state = 0
                 elif self.guard:
                     drop = close[k] / close[entry] - 1
                     mdrop = mkt[k] / mkt[entry] - 1 if mkt is not None and mkt[entry] > 0 else float("nan")
-                    info = {"entry": df.index[entry], "drop": drop, "mdrop": mdrop, "flow": flow[k]}
+                    info = {"entry": df.index[entry], "date": df.index[k], "drop": drop, "mdrop": mdrop,
+                            "flow": flow[k]}
                     cut = ""
                     if drop <= -self.floor:
                         cut = "floor"
@@ -152,9 +153,10 @@ class RsiStrategy(Strategy):
                             cut = "relative"
                     if cut:
                         info["cut"] = cut
-                        state, armed = 0, False
+                        state, armed, cut_info = 0, False, info
             pos.append(state)
-        return pos, info or {}
+        # 보유 중이면 오늘 판단 근거, 손절로 나온 뒤 아직 재진입 대기 중이면 그 손절 근거를 돌려준다
+        return pos, info or cut_info or {}
 
     def signals(self, df: pd.DataFrame) -> pd.Series:
         return pd.Series(self._walk(df)[0], index=df.index, dtype=int)
@@ -179,7 +181,9 @@ class RsiStrategy(Strategy):
             why = {"floor": f"신호일 대비 {self.floor:.0%} 넘게 하락 (최후 안전장치)",
                    "flow": "더 빠지는데 외국인+기관이 계속 팔고 있음 (큰손 이탈)",
                    "relative": "시장보다 훨씬 더 빠짐 (시장 탓이 아닌 종목 문제)"}[info["cut"]]
-            return f"상황 판단 손절: {why} · {self.guard_note(info)}"
+            when = f" · {_md(info['date'])} 종가 기준 판단" if info["date"] != rsi.index[-1] else ""
+            return (f"상황 판단 손절: {why} · {self.guard_note(info)}{when}"
+                    f" · 재매수는 RSI {self.REARM} 회복 후 (어제 RSI {now:.0f})")
         if target:
             low = rsi[rsi < self.oversold]
             when = f"{_md(low.index[-1])} RSI {low.iloc[-1]:.0f}로 과매도({self.oversold:g} 아래) → 반등 노림" if len(low) else ""

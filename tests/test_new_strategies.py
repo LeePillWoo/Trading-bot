@@ -321,3 +321,15 @@ def test_rsi_guard_floor_and_no_immediate_reentry():
     sig = rsi.signals(df)
     assert sig.iloc[-1] == 0  # 손절 뒤 RSI 가 아직 낮아도 바로 다시 사지 않음
     assert "최후 안전장치" in rsi.explain(df.loc[:sig[sig.diff() == -1].index[0]], 0)
+
+
+def test_rsi_guard_reason_survives_after_cut_day():
+    """손절 판단이 어제가 아니라 며칠 전 봉에서 났어도 (예: 기능을 늦게 켠 경우) 매도 이유에 손절 근거가 나와야 한다."""
+    from trading_bot.strategy import make_strategy
+    rsi = make_strategy("rsi", guard=0.1)
+    # 신호 뒤 -15% 급락(큰손 순매도) → 손절 조건, 그 뒤 사흘 더 횡보. RSI 는 여전히 낮아 재진입 안 함
+    df = _guard_df([-0.03] * 5 + [0.0] * 3, [0.0] * 8, flow=-1000.0)
+    sig = rsi.signals(df)
+    assert sig.iloc[-1] == 0 and sig.iloc[-4] == 0  # 사흘 전에 이미 0
+    text = rsi.explain(df, 0)
+    assert "상황 판단 손절" in text and "큰손 이탈" in text and "종가 기준 판단" in text and "재매수는 RSI 50" in text
