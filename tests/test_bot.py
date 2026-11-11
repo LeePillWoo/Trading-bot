@@ -219,3 +219,15 @@ def test_broker_buyable_quantity_is_authoritative(tmp_path):
     assert any("현금 부족으로 못 산 종목: A" in m for m in sent)
     # 증권사 가능 수량이 봇 계산보다 적으면 그 수량으로 줄여서 산다: B 90만원 몫 = 9000주, 상한가 기준 → 7692주
     assert broker.positions["B"].qty == 7692
+
+
+def test_reports_end_with_comment(tmp_path):
+    from trading_bot.fmt import strip_tags
+    bot, broker = make_bot(tmp_path)
+    sent = []
+    bot.notifier.send = lambda text, html=False: sent.append(strip_tags(text))
+    bot.step(MONDAY_0910)  # 매수 2종목
+    assert "💬 총평" in sent[-1] and "A, B: 매수 신호 → 매수." in sent[-1]
+    bot.step(datetime(2026, 10, 19, 15, 40, tzinfo=KST))  # 마감 보고
+    assert "🌙" in sent[-1] and "💬 총평" in sent[-1] and "오늘 봇 손익" in sent[-1]
+    assert "💬 총평" in strip_tags(bot.report_text())

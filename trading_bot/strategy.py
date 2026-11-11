@@ -39,6 +39,14 @@ class Strategy:
         기본은 모두 같음 = 후보 목록 순서."""
         return pd.Series(0.0, index=df.index)
 
+    def outlook(self, df: pd.DataFrame) -> dict:
+        """보유 종목 전망 (마감 보고 총평용). 마지막 봉까지 반영해 '다음 장 아침에 팔 것인지' 등을 돌려준다.
+        키: sell_tomorrow(bool), why(str), rsi(float), room(손절선까지 여유, 비율) — 전략마다 있는 것만."""
+        try:
+            return {"sell_tomorrow": int(self.signals(df).iloc[-1]) == 0, "why": "매도 신호"}
+        except Exception:
+            return {}
+
 
 def _md(ts) -> str:
     return f"{ts.month}/{ts.day}"
@@ -160,6 +168,25 @@ class RsiStrategy(Strategy):
 
     def signals(self, df: pd.DataFrame) -> pd.Series:
         return pd.Series(self._walk(df)[0], index=df.index, dtype=int)
+
+    def outlook(self, df: pd.DataFrame) -> dict:
+        rsi = self.rsi(df["close"], self.period).dropna()
+        if rsi.empty:
+            return {}
+        now = float(rsi.iloc[-1])
+        pos, info = self._walk(df)
+        out = {"rsi": now, "sell_tomorrow": pos[-1] == 0}
+        if pos[-1] == 0:
+            if info.get("cut"):
+                out["why"] = {"floor": "최후 안전장치 손절", "flow": "큰손 이탈로 손절",
+                              "relative": "시장 대비 급락으로 손절"}[info["cut"]]
+            elif now > self.overbought:
+                out["why"] = f"과매수 RSI {now:.0f}, 차익 실현"
+            else:
+                out["why"] = "매도 신호"
+        elif info and self.guard:
+            out["room"] = max(0.0, info["drop"] + self.guard)  # 손절선(-guard)까지 남은 여유
+        return out
 
     def guard_note(self, info: dict) -> str:
         if not info:

@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from .broker.base import Account, Broker
+from .commentary import close_comment, morning_comment
 from .config import BotConfig
 from .fmt import arrow, b, esc, i, kdate, pct, signed_won, won
 from .notify import Notifier
@@ -307,6 +308,73 @@ class TradingBot:
     def _price(self, symbol: str, acc: Account) -> float:
         pos = acc.positions.get(symbol)
         return pos.current_price if pos else self.broker.current_price(symbol)
+
+    def market_change(self, upto_today: bool) -> float | None:
+        """시장(코스피200 추종) 등락률. upto_today=False 면 어제 종가 기준(전전일 대비), True 면 오늘(현재) 기준."""
+        from .market import BENCHMARK
+        try:
+            df = self.broker.daily_ohlcv(BENCHMARK[0], 6)
+        except Exception as e:
+            log.warning("시장 지수 조회 실패: %s", e)
+            return None
+        today = datetime.now(KST).date()
+        c = df["close"][df.index.date <= today] if upto_today else df["close"][df.index.date < today]
+        return float(c.iloc[-1] / c.iloc[-2] - 1) if len(c) >= 2 else None
+
+    def _strategy_frame(self, sym: str, strategy, upto_today: bool, mkt=None) -> pd.DataFrame | None:
+        """전략 입력 데이터 (일봉 + 시장 지수 + 수급). 조회 실패 시 None."""
+        today = datetime.now(KST).date()
+        try:
+            df = self.broker.daily_ohlcv(sym, days=strategy.warmup + 250)
+        except Exception as e:
+            log.warning("%s 일봉 조회 실패: %s", sym, e)
+            return None
+        df = df[df.index.date <= today] if upto_today else df[df.index.date < today]
+        if mkt is not None:
+            df = df.join(mkt, how="left")
+        if getattr(strategy, "needs_flow", False):
+            try:
+                df = with_flow(df, self.broker.investor_flow(sym, days=strategy.warmup + 60))
+            except Exception as e:
+                log.warning("%s 수급 조회 실패: %s", sym, e)
+        return df
+
+    def morning_comment(self) -> str:
+        n_hold = sum(len(self.ledger(sl)) for sl in self.sleeves)
+        return morning_comment(self.state.trades_today, self.unaffordable, n_hold, self.label_of,
+                               self.market_change(upto_today=False), self.strategy.name, bool(self.halted))
+
+    def close_comment(self, acc: Account) -> str:
+        """마감 보고·/report 총평: 오늘 손익 vs 시장, 종목별 등락, 내일 아침 예정 행동."""
+        today, realized, _ = self.bot_pnl(acc)
+        base = self.state.start_equity or self.bot_equity(acc)
+        mkt = None
+        if any(getattr(sl.strategy, "guard", 0) for sl in self.sleeves):
+            from .market import BENCHMARK
+            try:
+                mkt = self.broker.daily_ohlcv(BENCHMARK[0], days=400)["close"].rename("mkt")
+            except Exception:
+                pass
+        holdings = []
+        for sl in self.sleeves:
+            for sym in self.ledger(sl):
+                try:
+                    cur, prev = self._price(sym, acc), self.prev_close(sym)
+                    chg = cur / prev - 1 if prev else None
+                except Exception:
+                    chg = None
+                out = {}
+                df = self._strategy_frame(sym, sl.strategy, upto_today=True, mkt=mkt)
+                if df is not None and len(df) >= sl.strategy.warmup:
+                    try:
+                        out = sl.strategy.outlook(df)
+                    except Exception:
+                        log.exception("%s 전망 계산 실패", sym)
+                holdings.append((self.label_of(sym), chg, out))
+        slot = self.bot_equity(acc) * (self.strategy.weight if getattr(self.strategy, "portfolio", False)
+                                        else self.cfg.risk.max_position_pct)
+        return close_comment(today, base, self.market_change(upto_today=True), holdings, acc.cash, slot, realized,
+                             live=is_market_open(datetime.now(KST)))
 
     def prev_close(self, symbol: str) -> float | None:
         """전일 종가 (보고의 '전일 대비' 용). 일봉 마지막 행이 오늘이면 그 앞 행. 조회 실패 시 None."""
@@ -789,7 +857,12 @@ class TradingBot:
         if len(self.sleeves) == 1 and parts[0].startswith("📅"):
             first, _, rest = parts[0].partition("\n")
             title, parts = f"{first} · {kdate(now)}", ([rest] if rest else [])
-        self.notify("\n\n".join([title, *parts, self.account_report(acc)]), html=True)
+        try:
+            comment = self.morning_comment()
+        except Exception:
+            log.exception("총평 생성 실패")
+            comment = ""
+        self.notify("\n\n".join(x for x in [title, *parts, self.account_report(acc), comment] if x), html=True)
 
     def status_text(self) -> str:
         """/status: 짧은 상태 (살아 있는지, 일시정지, 오늘 주문, 봇 손익 한 줄)."""
@@ -810,7 +883,12 @@ class TradingBot:
     def report_text(self) -> str:
         """/report: 자세한 보고 (전략 구성, 계좌, 봇 손익, 보유 종목)."""
         try:
-            body = self.account_report(self.broker.account())
+            acc = self.broker.account()
+            body = self.account_report(acc)
+            try:
+                body += "\n\n" + self.close_comment(acc)
+            except Exception:
+                log.exception("총평 생성 실패")
         except Exception as e:
             body = f"계좌 조회 실패: {esc(e)}"
         return f"📊 {b('계좌 보고서')} · {kdate(datetime.now(KST))}\n{esc(self.describe())}\n\n{body}"
@@ -878,7 +956,12 @@ class TradingBot:
             self.state.close_reported = True
             self.state.save()
             acc = self.broker.account()
-            self.notify(f"🌙 {b('장 마감 보고')} · {kdate(now)}\n\n{self.account_report(acc)}", html=True)
+            try:
+                comment = "\n\n" + self.close_comment(acc)
+            except Exception:
+                log.exception("총평 생성 실패")
+                comment = ""
+            self.notify(f"🌙 {b('장 마감 보고')} · {kdate(now)}\n\n{self.account_report(acc)}{comment}", html=True)
         if not is_market_open(now) or self.state.holiday or self.state.paused:
             return
         self.check_risk(self.broker.account())
