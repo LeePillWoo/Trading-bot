@@ -34,12 +34,16 @@ class Notifier:
 
 class TelegramNotifier(Notifier):
     enabled = True
+    # 409(동시 수신) 한두 번은 오탐일 수 있다: 네트워크가 끊겼다 붙거나(와이파이↔LTE 전환) 재시작 직후에는
+    # 텔레그램 쪽에 이전 롱폴링 연결이 최대 30초 남아 있어 409 가 난다. 이 시간 이상 계속될 때만 '동시 실행'으로 본다.
+    CONFLICT_GRACE = 120
 
     def __init__(self, token: str, chat_id: str, session: requests.Session | None = None):
         self.base = f"https://api.telegram.org/bot{token}"
         self.chat_id = str(chat_id)
         self.session = session or requests.Session()
         self._offset: int | None = None
+        self._conflict_since: float | None = None
 
     def send(self, text: str, html: bool = False) -> None:
         """html=True 면 텔레그램 HTML 서식(굵게 등)으로 보낸다. 서식 오류로 거부되면 일반 텍스트로 재전송."""
@@ -66,12 +70,16 @@ class TelegramNotifier(Notifier):
         try:
             resp = self.session.get(f"{self.base}/getUpdates", params=params, timeout=timeout + 10)
             if getattr(resp, "status_code", 200) == 409:
-                # 다른 기기에서 같은 봇이 동시에 실행 중 (텔레그램이 동시 수신을 거부)
-                self.conflict = True
+                # 다른 곳에서 같은 봇이 동시에 수신 중이거나, 끊긴 이전 연결이 아직 남아 있음
+                now = time.monotonic()
+                if self._conflict_since is None:
+                    self._conflict_since = now
+                    log.warning("텔레그램 409 (동시 수신) — %d초 넘게 계속되면 동시 실행으로 판단", self.CONFLICT_GRACE)
+                self.conflict = now - self._conflict_since >= self.CONFLICT_GRACE
                 time.sleep(min(timeout, 5))
                 return []
             updates = resp.json().get("result", [])
-            self.conflict = False
+            self.conflict, self._conflict_since = False, None
         except (requests.RequestException, ValueError) as e:
             log.warning("텔레그램 수신 실패 (%s)", type(e).__name__)
             time.sleep(min(timeout, 5))

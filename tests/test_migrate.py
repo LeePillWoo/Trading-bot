@@ -42,7 +42,10 @@ def test_telegram_conflict_flag():
 
     tg = TelegramNotifier("T", "1", session=S())
     tg.get_updates(0)
+    assert not tg.conflict  # 409 한 번(네트워크 재연결 등)은 동시 실행으로 보지 않음
+    tg._conflict_since -= tg.CONFLICT_GRACE  # 2분 넘게 계속되면
+    tg.get_updates(0)
     assert tg.conflict
     tg.session.code = 200
     tg.get_updates(0)
-    assert not tg.conflict
+    assert not tg.conflict and tg._conflict_since is None
